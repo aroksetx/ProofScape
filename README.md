@@ -186,6 +186,7 @@ go build -o screenshot-tool
 | `defaultDelay` | Default page load delay in milliseconds |
 | `defaultCookies` | Default cookies to set for all URLs |
 | `defaultLocalStorage` | Default localStorage values to set for all URLs |
+| `cookieProfiles` | Named sets of cookies and localStorage values |
 | `outputDir` | Directory to save screenshots |
 | `fileFormat` | Image format (png or jpeg) |
 | `quality` | Image quality (1-100) |
@@ -201,6 +202,7 @@ go build -o screenshot-tool
 | `delay` | Page load delay in milliseconds (optional) |
 | `cookies` | Array of cookies to set before capturing (optional) |
 | `localStorage` | Object of localStorage key-value pairs to set (optional) |
+| `cookieProfileId` | ID of a cookie profile to apply (optional) |
 
 ### Cookie Object Options
 
@@ -213,28 +215,43 @@ go build -o screenshot-tool
 | `secure` | Whether cookie is secure (optional) |
 | `httpOnly` | Whether cookie is HTTP only (optional) |
 
-## Testing Different Server Locations
+### Cookie Profiles
 
-You can use the cookie and localStorage features to test websites with different server locations:
+Cookie profiles allow you to define named sets of cookies and localStorage values that can be reused across multiple URLs. This is especially useful for testing the same site with different regional or user settings.
 
-```bash
-# Run with west coast configuration
-go run main.go -config=config.json
+Benefits of cookie profiles:
+- **Reusability**: Define a set of cookies once, use it for multiple URLs
+- **Maintainability**: Update cookies in one place
+- **Organization**: Group related cookies/localStorage together
+- **A/B Testing**: Easily switch between different site configurations
 
-# Run with east coast configuration
-go run main.go -config=config-east.json
-```
+### Priority Order for Cookies
 
-## Examples
+The tool applies cookies in this priority order:
 
-### Setting Cookies and localStorage
+1. URL-specific cookies (highest priority)
+2. Cookie profile cookies (if the URL has a `cookieProfileId` and no URL-specific cookies)
+3. Default cookies (lowest priority, applied if no URL-specific cookies or profile)
+
+### Cookie Logging
+
+For debugging purposes, the tool creates a cookie log file for each URL:
+- Shows cookies before and after your custom cookies are set
+- Records viewport size and screenshot type for each entry
+- Lists cookies that will be applied in the "before" stage
+- Shows complete details for all cookies
+
+Example log files are saved at `./screenshots/{url-name}/{url-name}-cookies.log`
+
+## Configuration Examples
+
+### Basic Example with Cookie Profiles
 
 ```json
 {
-  "urls": [
+  "cookieProfiles": [
     {
-      "name": "website-west-coast",
-      "url": "https://example.com",
+      "name": "west-coast",
       "cookies": [
         {
           "name": "location",
@@ -244,9 +261,93 @@ go run main.go -config=config-east.json
       "localStorage": {
         "region": "west"
       }
+    },
+    {
+      "name": "east-coast",
+      "cookies": [
+        {
+          "name": "location",
+          "value": "east-coast"
+        }
+      ],
+      "localStorage": {
+        "region": "east"
+      }
+    }
+  ],
+  "urls": [
+    {
+      "name": "example-west",
+      "url": "https://example.com",
+      "cookieProfileId": "west-coast"
+    },
+    {
+      "name": "example-east",
+      "url": "https://example.com",
+      "cookieProfileId": "east-coast"
     }
   ]
 }
+```
+
+### Advanced Cookie Usage
+
+```json
+{
+  "cookieProfiles": [
+    {
+      "name": "authenticated-user",
+      "cookies": [
+        {
+          "name": "session",
+          "value": "test-session-id",
+          "path": "/"
+        },
+        {
+          "name": "auth",
+          "value": "true",
+          "path": "/"
+        }
+      ],
+      "localStorage": {
+        "user": "{\"id\":123,\"name\":\"Test User\"}"
+      }
+    }
+  ],
+  "urls": [
+    {
+      "name": "site-auth",
+      "url": "https://example.com/dashboard",
+      "cookieProfileId": "authenticated-user"
+    },
+    {
+      "name": "site-with-override",
+      "url": "https://example.com/special",
+      "cookieProfileId": "authenticated-user",
+      "cookies": [
+        {
+          "name": "special-feature",
+          "value": "enabled"
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Command Line Examples
+
+Run with different cookie configurations:
+
+```bash
+# Run with west coast configuration
+go run main.go -config=config-cookie-profiles.json
+
+# To test different specific URLs only
+go run main.go -config=config-cookie-profiles.json -url="https://example.com"
+
+# To test with multiple specific URLs
+go run main.go -config=config-cookie-profiles.json -urls="https://example.com,https://google.com"
 ```
 
 ## Output
