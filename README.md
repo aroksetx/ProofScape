@@ -11,6 +11,8 @@ A robust Go application that automatically captures and analyzes screenshots of 
 - Configurable page loading delay times
 - Organized screenshot storage with consistent naming
 - **Automatic Chrome fallback**: Uses local Chrome if available, otherwise tries Docker
+- **Cookie/localStorage management**: Set and track cookies and localStorage values
+- **CSV cookie logging**: Saves all cookie data in CSV format for easy analysis
 
 ## Requirements
 
@@ -235,105 +237,48 @@ The tool applies cookies in this priority order:
 
 ### Cookie Logging
 
-For debugging purposes, the tool creates a cookie log file for each URL:
+The tool creates log files for cookies in two formats:
+
+#### Text Log Format
+For human-readable analysis, the tool creates a text log file for each URL:
 - Shows cookies before and after your custom cookies are set
 - Records viewport size and screenshot type for each entry
 - Lists cookies that will be applied in the "before" stage
 - Shows complete details for all cookies
 
-Example log files are saved at `./screenshots/{url-name}/{url-name}-cookies.log`
+#### CSV Log Format
+For data analysis and processing, the tool also saves cookies in CSV format:
+- Contains all cookie parameters in a structured format
+- Includes metadata like URL, timestamp, viewport size, and screenshot stage
+- Makes it easy to analyze cookies across different URLs and stages
+- Can be imported into spreadsheets or data analysis tools
 
-## Configuration Examples
+Log files are saved at:
+- Text logs: `./screenshots/{url-name}/{url-name}-cookies.log`
+- CSV logs: `./screenshots/{url-name}/{url-name}-cookies.csv`
 
-### Basic Example with Cookie Profiles
+## Command Line Options
 
-```json
-{
-  "cookieProfiles": [
-    {
-      "name": "west-coast",
-      "cookies": [
-        {
-          "name": "location",
-          "value": "west-coast"
-        }
-      ],
-      "localStorage": {
-        "region": "west"
-      }
-    },
-    {
-      "name": "east-coast",
-      "cookies": [
-        {
-          "name": "location",
-          "value": "east-coast"
-        }
-      ],
-      "localStorage": {
-        "region": "east"
-      }
-    }
-  ],
-  "urls": [
-    {
-      "name": "example-west",
-      "url": "https://example.com",
-      "cookieProfileId": "west-coast"
-    },
-    {
-      "name": "example-east",
-      "url": "https://example.com",
-      "cookieProfileId": "east-coast"
-    }
-  ]
-}
+Run the tool with various options:
+
+```bash
+# Basic usage with configuration file
+./screenshot-tool
+
+# Use a specific configuration file
+./screenshot-tool -config=custom-config.json
+
+# Test a specific URL (uses default viewports from config or 1280x800 if none defined)
+./screenshot-tool -url="https://example.com"
+
+# Test multiple URLs
+./screenshot-tool -urls="https://example.com,https://google.com"
+
+# Specify a custom name and delay for a URL
+./screenshot-tool -url="https://example.com" -name="custom-name" -delay=2000
 ```
 
-### Advanced Cookie Usage
-
-```json
-{
-  "cookieProfiles": [
-    {
-      "name": "authenticated-user",
-      "cookies": [
-        {
-          "name": "session",
-          "value": "test-session-id",
-          "path": "/"
-        },
-        {
-          "name": "auth",
-          "value": "true",
-          "path": "/"
-        }
-      ],
-      "localStorage": {
-        "user": "{\"id\":123,\"name\":\"Test User\"}"
-      }
-    }
-  ],
-  "urls": [
-    {
-      "name": "site-auth",
-      "url": "https://example.com/dashboard",
-      "cookieProfileId": "authenticated-user"
-    },
-    {
-      "name": "site-with-override",
-      "url": "https://example.com/special",
-      "cookieProfileId": "authenticated-user",
-      "cookies": [
-        {
-          "name": "special-feature",
-          "value": "enabled"
-        }
-      ]
-    }
-  ]
-}
-```
+**Note**: When using the `-url` or `-urls` flags, the tool will use the default viewports specified in your configuration file. If no default viewports are configured, a standard 1280x800 viewport will be used as a fallback.
 
 ## Command Line Examples
 
@@ -341,26 +286,28 @@ Run with different cookie configurations:
 
 ```bash
 # Run with west coast configuration
-go run main.go -config=config-cookie-profiles.json
+./screenshot-tool -config=config-cookie-profiles.json
 
 # To test different specific URLs only
-go run main.go -config=config-cookie-profiles.json -url="https://example.com"
+./screenshot-tool -config=config-cookie-profiles.json -url="https://example.com"
 
 # To test with multiple specific URLs
-go run main.go -config=config-cookie-profiles.json -urls="https://example.com,https://google.com"
+./screenshot-tool -config=config-cookie-profiles.json -urls="https://example.com,https://google.com"
 ```
 
 ## Output
 
-Screenshots are saved in the specified output directory with the following structure:
+Screenshots and logs are saved in the specified output directory with the following structure:
 
 ```
 /outputDir
   /{url-name}/
-    /{timestamp}-full.{format}        # Full page screenshot
-    /{timestamp}-viewport-1.{format}  # First viewport section
-    /{timestamp}-viewport-2.{format}  # Second viewport section
+    /{timestamp}-full-{width}x{height}.{format}     # Full page screenshot
+    /{timestamp}-viewport-{width}x{height}-1.{format}  # First viewport section
+    /{timestamp}-viewport-{width}x{height}-2.{format}  # Second viewport section
     ...
+    /{url-name}-cookies.log                # Cookie text log
+    /{url-name}-cookies.csv                # Cookie CSV log
 ```
 
 ## License
