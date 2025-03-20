@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,15 +38,103 @@ func cleanupDockerContainer() {
 	log.Println("Chrome Docker container stopped")
 }
 
+// extractDomain extracts a domain name from a URL for use as a default name
+func extractDomain(url string) string {
+	// Remove protocol if present
+	if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	} else if strings.HasPrefix(url, "https://") {
+		url = url[8:]
+	}
+
+	// Remove www. prefix if present
+	if strings.HasPrefix(url, "www.") {
+		url = url[4:]
+	}
+
+	// Get domain part (stop at first slash)
+	if idx := strings.Index(url, "/"); idx > 0 {
+		url = url[:idx]
+	}
+
+	// Remove port if present
+	if idx := strings.Index(url, ":"); idx > 0 {
+		url = url[:idx]
+	}
+
+	return url
+}
+
 func main() {
 	// Parse command line flags
 	configPath := flag.String("config", "config.json", "Path to configuration file")
+	cmdUrls := flag.String("urls", "", "Comma-separated list of URLs to capture (overrides config file URLs)")
+	cmdUrl := flag.String("url", "", "Single URL to capture (overrides config file URLs)")
+	name := flag.String("name", "", "Name for the URL when using -url flag (defaults to domain)")
+	delay := flag.Int("delay", 0, "Delay in milliseconds for page loading when using -url flag (defaults to 1000)")
 	flag.Parse()
 
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// Handle command-line URLs if provided
+	if *cmdUrl != "" || *cmdUrls != "" {
+		// Override config URLs with command line URLs
+		cfg.URLs = []config.URLConfig{}
+
+		if *cmdUrl != "" {
+			// Single URL mode
+			urlName := *name
+			if urlName == "" {
+				// Extract domain as default name
+				urlName = extractDomain(*cmdUrl)
+			}
+
+			urlDelay := 1000
+			if *delay > 0 {
+				urlDelay = *delay
+			}
+
+			cfg.URLs = append(cfg.URLs, config.URLConfig{
+				Name:      urlName,
+				URL:       *cmdUrl,
+				Viewports: []config.Viewport{},
+				Delay:     urlDelay,
+			})
+
+			log.Printf("Using single URL from command line: %s", *cmdUrl)
+		} else if *cmdUrls != "" {
+			// Multiple URLs mode
+			urlList := strings.Split(*cmdUrls, ",")
+			for _, url := range urlList {
+				url = strings.TrimSpace(url)
+				if url == "" {
+					continue
+				}
+
+				urlDelay := 1000
+				if *delay > 0 {
+					urlDelay = *delay
+				}
+
+				cfg.URLs = append(cfg.URLs, config.URLConfig{
+					Name:      extractDomain(url),
+					URL:       url,
+					Viewports: []config.Viewport{},
+					Delay:     urlDelay,
+				})
+			}
+
+			log.Printf("Using %d URLs from command line", len(cfg.URLs))
+		}
+	}
+
+	// Check if we have any URLs to process
+	if len(cfg.URLs) == 0 {
+		log.Fatalf("No URLs to process. Please specify URLs in the config file or use -url/-urls flags.")
 	}
 
 	// Create screenshot handler

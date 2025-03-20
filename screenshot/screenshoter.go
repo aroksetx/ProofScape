@@ -135,15 +135,40 @@ func NewScreenshoter(cfg *config.Config) *Screenshoter {
 	}
 }
 
-// CaptureURL captures screenshots for a given URL
+// CaptureURL captures screenshots for a given URL with all configured viewports
 func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfig) error {
-	// Create context with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(urlConfig.Delay+30000)*time.Millisecond)
+	// Create context with timeout - increase for complex pages
+	// Calculate a longer timeout based on the number of viewports and complexity
+	viewportsCount := len(urlConfig.Viewports)
+	timeoutDuration := time.Duration(urlConfig.Delay*3+60000*viewportsCount) * time.Millisecond
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
+	log.Printf("Set timeout of %v for URL %s with %d viewports", timeoutDuration, urlConfig.Name, viewportsCount)
+
+	// Create directory for this URL
+	urlDir := filepath.Join(s.Config.OutputDir, sanitizeFilename(urlConfig.Name))
+	if err := os.MkdirAll(urlDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory for URL %s: %w", urlConfig.Name, err)
+	}
+
+	// Process each viewport for this URL
+	for _, viewport := range urlConfig.Viewports {
+		log.Printf("Capturing screenshots for %s at viewport %dx%d", urlConfig.Name, viewport.Width, viewport.Height)
+		if err := s.captureWithViewport(timeoutCtx, urlConfig, viewport, urlDir, true); err != nil {
+			return fmt.Errorf("failed to capture screenshots for %s at viewport %dx%d: %w",
+				urlConfig.Name, viewport.Width, viewport.Height, err)
+		}
+	}
+
+	return nil
+}
+
+// captureWithViewport captures screenshots for a specific viewport size
+func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string, captureViewports bool) error {
 	// Create browser options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.WindowSize(urlConfig.Viewport.Width, urlConfig.Viewport.Height),
+		chromedp.WindowSize(viewport.Width, viewport.Height),
 		chromedp.DisableGPU,
 		chromedp.NoSandbox,
 		chromedp.Headless,
@@ -164,7 +189,7 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 		opts = append(opts, chromedp.ExecPath(execPath))
 
 		// Create allocator context with local Chrome
-		allocCtx, cancelAlloc = chromedp.NewExecAllocator(timeoutCtx, opts...)
+		allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
 		defer cancelAlloc()
 	} else {
 		// Try Docker Chrome as fallback
@@ -174,14 +199,14 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 		if dockerURL, err := startDockerChrome(); err == nil {
 			// Use Docker Chrome
 			log.Printf("Using Docker Chrome at: %s", dockerURL)
-			allocCtx, cancelAlloc = chromedp.NewRemoteAllocator(timeoutCtx, dockerURL)
+			allocCtx, cancelAlloc = chromedp.NewRemoteAllocator(ctx, dockerURL)
 			defer cancelAlloc()
 		} else {
 			// Fallback to default Chrome as last resort
 			log.Printf("Docker Chrome failed: %v", err)
 			log.Printf("Falling back to default Chrome settings")
 
-			allocCtx, cancelAlloc = chromedp.NewExecAllocator(timeoutCtx, opts...)
+			allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
 			defer cancelAlloc()
 		}
 	}
@@ -190,30 +215,28 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 	browserCtx, cancelBrowser = chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
 	defer cancelBrowser()
 
-	// Create directory for this URL
-	urlDir := filepath.Join(s.Config.OutputDir, sanitizeFilename(urlConfig.Name))
-	if err := os.MkdirAll(urlDir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory for URL %s: %w", urlConfig.Name, err)
-	}
-
 	// Capture full page screenshot
-	if err := s.captureFullPageScreenshot(browserCtx, urlConfig, urlDir); err != nil {
-		return fmt.Errorf("failed to capture full page screenshot for %s: %w", urlConfig.Name, err)
+	if err := s.captureFullPageScreenshot(browserCtx, urlConfig, viewport, urlDir); err != nil {
+		return fmt.Errorf("failed to capture full page screenshot for %s at viewport %dx%d: %w",
+			urlConfig.Name, viewport.Width, viewport.Height, err)
 	}
 
-	// Capture viewport screenshots
-	if err := s.captureViewportScreenshots(browserCtx, urlConfig, urlDir); err != nil {
-		return fmt.Errorf("failed to capture viewport screenshots for %s: %w", urlConfig.Name, err)
+	// Capture viewport screenshots if requested
+	if captureViewports {
+		if err := s.captureViewportScreenshots(browserCtx, urlConfig, viewport, urlDir); err != nil {
+			return fmt.Errorf("failed to capture viewport screenshots for %s at viewport %dx%d: %w",
+				urlConfig.Name, viewport.Width, viewport.Height, err)
+		}
 	}
 
 	return nil
 }
 
 // captureFullPageScreenshot captures a full page screenshot
-func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig config.URLConfig, urlDir string) error {
+func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string) error {
 	var buf []byte
 	timestamp := time.Now().Format("20060102-150405")
-	filename := fmt.Sprintf("%s-full.%s", timestamp, s.Config.FileFormat)
+	filename := fmt.Sprintf("%s-full-%dx%d.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
 	filepath := filepath.Join(urlDir, filename)
 
 	// Create actions to navigate and capture screenshot
@@ -263,12 +286,12 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 		return err
 	}
 
-	log.Printf("Captured full page screenshot for %s: %s", urlConfig.Name, filepath)
+	log.Printf("Captured full page screenshot for %s at viewport %dx%d: %s", urlConfig.Name, viewport.Width, viewport.Height, filepath)
 	return nil
 }
 
 // captureViewportScreenshots captures screenshots divided by viewport
-func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig config.URLConfig, urlDir string) error {
+func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string) error {
 	var pageHeight float64
 	timestamp := time.Now().Format("20060102-150405")
 
@@ -291,7 +314,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	}
 
 	// Calculate how many viewport sections we need
-	viewportHeight := float64(urlConfig.Viewport.Height)
+	viewportHeight := float64(viewport.Height)
 	viewportCount := int(pageHeight / viewportHeight)
 	if float64(viewportCount)*viewportHeight < pageHeight {
 		viewportCount++
@@ -301,7 +324,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	for i := 0; i < viewportCount; i++ {
 		var buf []byte
 		scrollPos := float64(i) * viewportHeight
-		filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, urlConfig.Viewport.Width, urlConfig.Viewport.Height, i+1, s.Config.FileFormat)
+		filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, viewport.Width, viewport.Height, i+1, s.Config.FileFormat)
 		filepath := filepath.Join(urlDir, filename)
 
 		// Scroll to position and capture screenshot of only the viewport
@@ -311,7 +334,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 			chromedp.Sleep(500*time.Millisecond), // Give time for any animations to complete
 
 			// Ensure device metrics are set to capture only viewport
-			emulation.SetDeviceMetricsOverride(int64(urlConfig.Viewport.Width), int64(urlConfig.Viewport.Height), 1, false).
+			emulation.SetDeviceMetricsOverride(int64(viewport.Width), int64(viewport.Height), 1, false).
 				WithScreenOrientation(&emulation.ScreenOrientation{
 					Type:  emulation.OrientationTypePortraitPrimary,
 					Angle: 0,
