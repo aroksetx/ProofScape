@@ -1,0 +1,30 @@
+{
+  "urls": [
+    {
+      "name": "example-homepage",
+      "url": "https://example.com",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "delay": 1000
+    },
+    {
+      "name": "github",
+      "url": "https://github.com",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "delay": 2000
+    }
+  ],
+  "defaultViewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "outputDir": "./screenshots",
+  "fileFormat": "png",
+  "quality": 80,
+  "concurrency": 2
+} 
