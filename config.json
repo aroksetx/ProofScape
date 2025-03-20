@@ -17,9 +17,8 @@
     }
   ],
   "urlList": [
-    "https://github.com",
     "https://google.com",
-    "https://twitter.com"
+    "https://www.capitalgroup.com/advisor/investments/exchange-traded-funds/details/cgcp"
   ],
   "defaultDelay": 2000,
   "defaultViewports": [
@@ -28,16 +27,17 @@
       "height": 1080
     },
     {
-      "width": 1366,
-      "height": 768
-    },
-    {
       "width": 768,
       "height": 1024
-    },
+    }
+  ],
+  "defaultCookies": [
     {
-      "width": 375,
-      "height": 667
+      "name": "location",
+      "value": "ew1",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false
     }
   ],
   "outputDir": "./screenshots",

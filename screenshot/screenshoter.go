@@ -13,7 +13,10 @@ import (
 
 	"screenshot-tool/config"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -232,6 +235,83 @@ func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config
 	return nil
 }
 
+// SaveCookiesToFile saves all current cookies to a log file
+func SaveCookiesToFile(ctx context.Context, urlConfig config.URLConfig, stage string, urlDir string, viewport config.Viewport, screenshotType string) chromedp.ActionFunc {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		// Get all cookies
+		cookies, err := storage.GetCookies().Do(ctx)
+		if err != nil {
+			return err
+		}
+
+		// Create a single log file for the URL
+		timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+		// Use a fixed filename for each URL
+		filename := fmt.Sprintf("%s-cookies.log", sanitizeFilename(urlConfig.Name))
+		filepath := filepath.Join(urlDir, filename)
+
+		// Format cookies as text
+		var cookieText strings.Builder
+		cookieText.WriteString(fmt.Sprintf("\n\n========== %s ==========\n", stage))
+		cookieText.WriteString(fmt.Sprintf("URL: %s (%s)\n", urlConfig.Name, urlConfig.URL))
+		cookieText.WriteString(fmt.Sprintf("Timestamp: %s\n", timestamp))
+		cookieText.WriteString(fmt.Sprintf("Viewport: %dx%d\n", viewport.Width, viewport.Height))
+		cookieText.WriteString(fmt.Sprintf("Screenshot Type: %s\n", screenshotType))
+		cookieText.WriteString(fmt.Sprintf("Step: %s\n", stage))
+
+		// Add information about configured cookies if we're in the "before" stage
+		if strings.Contains(stage, "before") && len(urlConfig.Cookies) > 0 {
+			cookieText.WriteString("\nConfigured cookies that will be set:\n")
+			for i, cookie := range urlConfig.Cookies {
+				cookieText.WriteString(fmt.Sprintf("  Config Cookie #%d: %s=%s (domain: %s, path: %s)\n",
+					i+1, cookie.Name, cookie.Value,
+					cookie.Domain, cookie.Path))
+			}
+		}
+
+		cookieText.WriteString("\n----------------------------------------\n")
+		cookieText.WriteString(fmt.Sprintf("Current cookies (%d):\n", len(cookies)))
+
+		for i, cookie := range cookies {
+			cookieText.WriteString(fmt.Sprintf("Cookie #%d:\n", i+1))
+			cookieText.WriteString(fmt.Sprintf("  Name: %s\n", cookie.Name))
+			cookieText.WriteString(fmt.Sprintf("  Value: %s\n", cookie.Value))
+			cookieText.WriteString(fmt.Sprintf("  Domain: %s\n", cookie.Domain))
+			cookieText.WriteString(fmt.Sprintf("  Path: %s\n", cookie.Path))
+			cookieText.WriteString(fmt.Sprintf("  Expires: %s\n", time.Unix(int64(cookie.Expires), 0)))
+			cookieText.WriteString(fmt.Sprintf("  Size: %d\n", cookie.Size))
+			cookieText.WriteString(fmt.Sprintf("  HttpOnly: %t\n", cookie.HTTPOnly))
+			cookieText.WriteString(fmt.Sprintf("  Secure: %t\n", cookie.Secure))
+			cookieText.WriteString(fmt.Sprintf("  Session: %t\n", cookie.Session))
+			cookieText.WriteString(fmt.Sprintf("  SameSite: %s\n", cookie.SameSite))
+			cookieText.WriteString(fmt.Sprintf("  Priority: %s\n", cookie.Priority))
+			cookieText.WriteString("----------------------------------------\n")
+		}
+
+		// Check if file exists and append to it
+		var fileContent []byte
+		if _, err := os.Stat(filepath); err == nil {
+			// File exists, read existing content
+			fileContent, err = os.ReadFile(filepath)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Append new content
+		fileContent = append(fileContent, []byte(cookieText.String())...)
+
+		// Write to file
+		if err := os.WriteFile(filepath, fileContent, 0644); err != nil {
+			return err
+		}
+
+		log.Printf("Saved %d cookies to log file: %s (viewport: %dx%d, type: %s, stage: %s)",
+			len(cookies), filepath, viewport.Width, viewport.Height, screenshotType, stage)
+		return nil
+	})
+}
+
 // captureFullPageScreenshot captures a full page screenshot
 func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string) error {
 	var buf []byte
@@ -239,21 +319,85 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 	filename := fmt.Sprintf("%s-full-%dx%d.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
 	filepath := filepath.Join(urlDir, filename)
 
-	// Create actions to navigate and capture screenshot
-	tasks := []chromedp.Action{
-		chromedp.Navigate(urlConfig.URL),
-		chromedp.Sleep(time.Duration(urlConfig.Delay) * time.Millisecond),
+	// Create base actions list
+	var tasks []chromedp.Action
+
+	// First navigate to the URL
+	tasks = append(tasks, chromedp.Navigate(urlConfig.URL))
+
+	// Log cookies before setting our custom ones
+	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before", urlDir, viewport, "full page"))
+
+	// Set cookies if specified
+	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
+		// Add cookies if specified
+		if len(urlConfig.Cookies) > 0 {
+			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
+			tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+				// Create cookie expiration (180 days)
+				expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
+
+				for _, cookie := range urlConfig.Cookies {
+					// Extract domain from URL if not specified in cookie
+					domain := cookie.Domain
+					if domain == "" {
+						// Use the URL's domain
+						domain = extractDomainFromURL(urlConfig.URL)
+					}
+
+					// Set cookie path to root if not specified
+					path := cookie.Path
+					if path == "" {
+						path = "/"
+					}
+
+					err := network.SetCookie(cookie.Name, cookie.Value).
+						WithExpires(&expr).
+						WithDomain(domain).
+						WithPath(path).
+						WithHTTPOnly(cookie.HTTPOnly).
+						WithSecure(cookie.Secure).
+						Do(ctx)
+
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+		}
+
+		// Set localStorage values if specified
+		if len(urlConfig.LocalStorage) > 0 {
+			log.Printf("Setting %d localStorage items for %s", len(urlConfig.LocalStorage), urlConfig.Name)
+			for _, storage := range urlConfig.LocalStorage {
+				jsScript := fmt.Sprintf(`localStorage.setItem("%s", "%s")`,
+					escapeJSString(storage.Key), escapeJSString(storage.Value))
+				tasks = append(tasks, chromedp.Evaluate(jsScript, nil))
+			}
+		}
+
+		// Reload the page to ensure cookies and localStorage take effect
+		tasks = append(tasks, chromedp.Reload())
+
+		// Log cookies after setting our custom ones
+		tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "after", urlDir, viewport, "full page"))
+	}
+
+	// Add remaining actions for screenshot
+	tasks = append(tasks,
+		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
 
 		// Scroll to bottom to load lazy content
 		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
-		chromedp.Sleep(1 * time.Second), // Wait for content to load
+		chromedp.Sleep(1*time.Second), // Wait for content to load
 
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
-		chromedp.Sleep(1 * time.Second), // Wait for animations to complete
+		chromedp.Sleep(1*time.Second), // Wait for animations to complete
 
 		// Add additional delay to ensure all elements are loaded
-		chromedp.Sleep(2 * time.Second),
+		chromedp.Sleep(2*time.Second),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// Get page metrics
 			var metrics map[string]interface{}
@@ -274,7 +418,7 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 			// Capture full screenshot
 			return chromedp.CaptureScreenshot(&buf).Do(ctx)
 		}),
-	}
+	)
 
 	// Execute tasks
 	if err := chromedp.Run(ctx, tasks...); err != nil {
@@ -295,9 +439,73 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	var pageHeight float64
 	timestamp := time.Now().Format("20060102-150405")
 
-	// First navigate and get page height
-	if err := chromedp.Run(ctx,
-		chromedp.Navigate(urlConfig.URL),
+	// Create base actions list
+	var tasks []chromedp.Action
+
+	// First navigate to the URL
+	tasks = append(tasks, chromedp.Navigate(urlConfig.URL))
+
+	// Log cookies before setting our custom ones
+	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before-viewport", urlDir, viewport, "viewport"))
+
+	// Set cookies if specified
+	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
+		// Add cookies if specified
+		if len(urlConfig.Cookies) > 0 {
+			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
+			tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+				// Create cookie expiration (180 days)
+				expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
+
+				for _, cookie := range urlConfig.Cookies {
+					// Extract domain from URL if not specified in cookie
+					domain := cookie.Domain
+					if domain == "" {
+						// Use the URL's domain
+						domain = extractDomainFromURL(urlConfig.URL)
+					}
+
+					// Set cookie path to root if not specified
+					path := cookie.Path
+					if path == "" {
+						path = "/"
+					}
+
+					err := network.SetCookie(cookie.Name, cookie.Value).
+						WithExpires(&expr).
+						WithDomain(domain).
+						WithPath(path).
+						WithHTTPOnly(cookie.HTTPOnly).
+						WithSecure(cookie.Secure).
+						Do(ctx)
+
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+		}
+
+		// Set localStorage values if specified
+		if len(urlConfig.LocalStorage) > 0 {
+			log.Printf("Setting %d localStorage items for %s", len(urlConfig.LocalStorage), urlConfig.Name)
+			for _, storage := range urlConfig.LocalStorage {
+				jsScript := fmt.Sprintf(`localStorage.setItem("%s", "%s")`,
+					escapeJSString(storage.Key), escapeJSString(storage.Value))
+				tasks = append(tasks, chromedp.Evaluate(jsScript, nil))
+			}
+		}
+
+		// Reload the page to ensure cookies and localStorage take effect
+		tasks = append(tasks, chromedp.Reload())
+
+		// Log cookies after setting our custom ones
+		tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "after-viewport", urlDir, viewport, "viewport"))
+	}
+
+	// Add remaining actions for screenshot
+	tasks = append(tasks,
 		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
 
 		// Scroll to bottom to load lazy content
@@ -309,7 +517,10 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		chromedp.Sleep(1*time.Second), // Wait for animations to complete
 
 		chromedp.Evaluate(`Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)`, &pageHeight),
-	); err != nil {
+	)
+
+	// Execute tasks to get page height
+	if err := chromedp.Run(ctx, chromedp.Tasks(tasks)); err != nil {
 		return err
 	}
 
@@ -398,4 +609,48 @@ func (s *Screenshoter) CaptureURLs(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// extractDomainFromURL extracts a domain name from a URL for cookie setting
+func extractDomainFromURL(url string) string {
+	// Remove protocol if present
+	if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	} else if strings.HasPrefix(url, "https://") {
+		url = url[8:]
+	}
+
+	// Remove www. prefix if present
+	if strings.HasPrefix(url, "www.") {
+		url = url[4:]
+	}
+
+	// Get domain part (stop at first slash)
+	if idx := strings.Index(url, "/"); idx > 0 {
+		url = url[:idx]
+	}
+
+	// Remove port if present
+	if idx := strings.Index(url, ":"); idx > 0 {
+		url = url[:idx]
+	}
+
+	return url
+}
+
+// escapeJSString escapes a string for use in JavaScript
+func escapeJSString(s string) string {
+	// Replace backslash with double backslash
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	// Replace double quote with escaped double quote
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	// Replace single quote with escaped single quote
+	s = strings.ReplaceAll(s, "'", "\\'")
+	// Replace newline with escaped newline
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	// Replace carriage return with escaped carriage return
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	// Replace tab with escaped tab
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return s
 }

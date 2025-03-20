@@ -107,16 +107,52 @@ go mod tidy
     {
       "name": "example-homepage",
       "url": "https://example.com",
-      "viewport": {
-        "width": 1920,
-        "height": 1080
-      },
-      "delay": 1000
+      "viewports": [
+        {
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "width": 768,
+          "height": 1024
+        }
+      ],
+      "delay": 1000,
+      "cookies": [
+        {
+          "name": "location",
+          "value": "west-coast",
+          "path": "/",
+          "secure": false,
+          "httpOnly": false
+        }
+      ],
+      "localStorage": {
+        "preferredLocation": "west-coast",
+        "userSettings": "{\"theme\":\"dark\"}"
+      }
     }
   ],
-  "defaultViewport": {
-    "width": 1280,
-    "height": 800
+  "urlList": ["https://github.com", "https://google.com"],
+  "defaultDelay": 2000,
+  "defaultViewports": [
+    {
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "defaultCookies": [
+    {
+      "name": "session",
+      "value": "test-session",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false
+    }
+  ],
+  "defaultLocalStorage": {
+    "theme": "light",
+    "language": "en"
   },
   "outputDir": "./screenshots",
   "fileFormat": "png",
@@ -145,7 +181,11 @@ go build -o screenshot-tool
 | Option | Description |
 |--------|-------------|
 | `urls` | Array of URL objects to process |
-| `defaultViewport` | Default viewport dimensions |
+| `urlList` | Simple array of URLs to process (uses defaults) |
+| `defaultViewports` | Array of default viewport dimensions |
+| `defaultDelay` | Default page load delay in milliseconds |
+| `defaultCookies` | Default cookies to set for all URLs |
+| `defaultLocalStorage` | Default localStorage values to set for all URLs |
 | `outputDir` | Directory to save screenshots |
 | `fileFormat` | Image format (png or jpeg) |
 | `quality` | Image quality (1-100) |
@@ -157,8 +197,57 @@ go build -o screenshot-tool
 |--------|-------------|
 | `name` | Identifier for the URL (used in filenames) |
 | `url` | URL to capture |
-| `viewport` | Custom viewport dimensions (optional) |
+| `viewports` | Array of custom viewport dimensions (optional) |
 | `delay` | Page load delay in milliseconds (optional) |
+| `cookies` | Array of cookies to set before capturing (optional) |
+| `localStorage` | Object of localStorage key-value pairs to set (optional) |
+
+### Cookie Object Options
+
+| Option | Description |
+|--------|-------------|
+| `name` | Cookie name |
+| `value` | Cookie value |
+| `domain` | Cookie domain (optional, defaults to URL domain) |
+| `path` | Cookie path (optional, defaults to "/") |
+| `secure` | Whether cookie is secure (optional) |
+| `httpOnly` | Whether cookie is HTTP only (optional) |
+
+## Testing Different Server Locations
+
+You can use the cookie and localStorage features to test websites with different server locations:
+
+```bash
+# Run with west coast configuration
+go run main.go -config=config.json
+
+# Run with east coast configuration
+go run main.go -config=config-east.json
+```
+
+## Examples
+
+### Setting Cookies and localStorage
+
+```json
+{
+  "urls": [
+    {
+      "name": "website-west-coast",
+      "url": "https://example.com",
+      "cookies": [
+        {
+          "name": "location",
+          "value": "west-coast"
+        }
+      ],
+      "localStorage": {
+        "region": "west"
+      }
+    }
+  ]
+}
+```
 
 ## Output
 
