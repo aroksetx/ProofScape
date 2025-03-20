@@ -238,78 +238,180 @@ func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config
 // SaveCookiesToFile saves all current cookies to a log file
 func SaveCookiesToFile(ctx context.Context, urlConfig config.URLConfig, stage string, urlDir string, viewport config.Viewport, screenshotType string) chromedp.ActionFunc {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
+		log.Printf("SaveCookiesToFile called for %s (stage: %s, type: %s)", urlConfig.Name, stage, screenshotType)
+
 		// Get all cookies
 		cookies, err := storage.GetCookies().Do(ctx)
 		if err != nil {
+			log.Printf("ERROR: Failed to get cookies: %v", err)
 			return err
 		}
+		log.Printf("Retrieved %d cookies for %s", len(cookies), urlConfig.Name)
 
 		// Create a single log file for the URL
 		timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-		// Use a fixed filename for each URL
-		filename := fmt.Sprintf("%s-cookies.log", sanitizeFilename(urlConfig.Name))
-		filepath := filepath.Join(urlDir, filename)
 
-		// Format cookies as text
-		var cookieText strings.Builder
-		cookieText.WriteString(fmt.Sprintf("\n\n========== %s ==========\n", stage))
-		cookieText.WriteString(fmt.Sprintf("URL: %s (%s)\n", urlConfig.Name, urlConfig.URL))
-		cookieText.WriteString(fmt.Sprintf("Timestamp: %s\n", timestamp))
-		cookieText.WriteString(fmt.Sprintf("Viewport: %dx%d\n", viewport.Width, viewport.Height))
-		cookieText.WriteString(fmt.Sprintf("Screenshot Type: %s\n", screenshotType))
-		cookieText.WriteString(fmt.Sprintf("Step: %s\n", stage))
-
-		// Add information about configured cookies if we're in the "before" stage
-		if strings.Contains(stage, "before") && len(urlConfig.Cookies) > 0 {
-			cookieText.WriteString("\nConfigured cookies that will be set:\n")
-			for i, cookie := range urlConfig.Cookies {
-				cookieText.WriteString(fmt.Sprintf("  Config Cookie #%d: %s=%s (domain: %s, path: %s)\n",
-					i+1, cookie.Name, cookie.Value,
-					cookie.Domain, cookie.Path))
-			}
-		}
-
-		cookieText.WriteString("\n----------------------------------------\n")
-		cookieText.WriteString(fmt.Sprintf("Current cookies (%d):\n", len(cookies)))
-
-		for i, cookie := range cookies {
-			cookieText.WriteString(fmt.Sprintf("Cookie #%d:\n", i+1))
-			cookieText.WriteString(fmt.Sprintf("  Name: %s\n", cookie.Name))
-			cookieText.WriteString(fmt.Sprintf("  Value: %s\n", cookie.Value))
-			cookieText.WriteString(fmt.Sprintf("  Domain: %s\n", cookie.Domain))
-			cookieText.WriteString(fmt.Sprintf("  Path: %s\n", cookie.Path))
-			cookieText.WriteString(fmt.Sprintf("  Expires: %s\n", time.Unix(int64(cookie.Expires), 0)))
-			cookieText.WriteString(fmt.Sprintf("  Size: %d\n", cookie.Size))
-			cookieText.WriteString(fmt.Sprintf("  HttpOnly: %t\n", cookie.HTTPOnly))
-			cookieText.WriteString(fmt.Sprintf("  Secure: %t\n", cookie.Secure))
-			cookieText.WriteString(fmt.Sprintf("  Session: %t\n", cookie.Session))
-			cookieText.WriteString(fmt.Sprintf("  SameSite: %s\n", cookie.SameSite))
-			cookieText.WriteString(fmt.Sprintf("  Priority: %s\n", cookie.Priority))
-			cookieText.WriteString("----------------------------------------\n")
-		}
-
-		// Check if file exists and append to it
-		var fileContent []byte
-		if _, err := os.Stat(filepath); err == nil {
-			// File exists, read existing content
-			fileContent, err = os.ReadFile(filepath)
-			if err != nil {
-				return err
-			}
-		}
-
-		// Append new content
-		fileContent = append(fileContent, []byte(cookieText.String())...)
-
-		// Write to file
-		if err := os.WriteFile(filepath, fileContent, 0644); err != nil {
+		// Save text log
+		if err := saveCookiesTextLog(cookies, urlConfig, stage, urlDir, viewport, screenshotType, timestamp); err != nil {
+			log.Printf("ERROR: Failed to save cookies text log: %v", err)
 			return err
 		}
+		log.Printf("Saved cookies to text log successfully")
 
-		log.Printf("Saved %d cookies to log file: %s (viewport: %dx%d, type: %s, stage: %s)",
-			len(cookies), filepath, viewport.Width, viewport.Height, screenshotType, stage)
+		// Save CSV log
+		if err := saveCookiesCSV(cookies, urlConfig, stage, urlDir, viewport, screenshotType, timestamp); err != nil {
+			log.Printf("ERROR: Failed to save cookies CSV: %v", err)
+			return err
+		}
+		log.Printf("Saved cookies to CSV successfully")
+
+		log.Printf("Saved %d cookies to log files (viewport: %dx%d, type: %s, stage: %s)",
+			len(cookies), viewport.Width, viewport.Height, screenshotType, stage)
 		return nil
 	})
+}
+
+// saveCookiesTextLog saves cookies in text format
+func saveCookiesTextLog(cookies []*network.Cookie, urlConfig config.URLConfig, stage string, urlDir string, viewport config.Viewport, screenshotType, timestamp string) error {
+	// Use a fixed filename for each URL
+	filename := fmt.Sprintf("%s-cookies.log", sanitizeFilename(urlConfig.Name))
+	filepath := filepath.Join(urlDir, filename)
+
+	// Format cookies as text
+	var cookieText strings.Builder
+	cookieText.WriteString(fmt.Sprintf("\n\n========== %s ==========\n", stage))
+	cookieText.WriteString(fmt.Sprintf("URL: %s (%s)\n", urlConfig.Name, urlConfig.URL))
+	cookieText.WriteString(fmt.Sprintf("Timestamp: %s\n", timestamp))
+	cookieText.WriteString(fmt.Sprintf("Viewport: %dx%d\n", viewport.Width, viewport.Height))
+	cookieText.WriteString(fmt.Sprintf("Screenshot Type: %s\n", screenshotType))
+	cookieText.WriteString(fmt.Sprintf("Step: %s\n", stage))
+
+	// Add information about configured cookies if we're in the "before" stage
+	if strings.Contains(stage, "before") && len(urlConfig.Cookies) > 0 {
+		cookieText.WriteString("\nConfigured cookies that will be set:\n")
+		for i, cookie := range urlConfig.Cookies {
+			cookieText.WriteString(fmt.Sprintf("  Config Cookie #%d: %s=%s (domain: %s, path: %s)\n",
+				i+1, cookie.Name, cookie.Value,
+				cookie.Domain, cookie.Path))
+		}
+	}
+
+	cookieText.WriteString("\n----------------------------------------\n")
+	cookieText.WriteString(fmt.Sprintf("Current cookies (%d):\n", len(cookies)))
+
+	for i, cookie := range cookies {
+		cookieText.WriteString(fmt.Sprintf("Cookie #%d:\n", i+1))
+		cookieText.WriteString(fmt.Sprintf("  Name: %s\n", cookie.Name))
+		cookieText.WriteString(fmt.Sprintf("  Value: %s\n", cookie.Value))
+		cookieText.WriteString(fmt.Sprintf("  Domain: %s\n", cookie.Domain))
+		cookieText.WriteString(fmt.Sprintf("  Path: %s\n", cookie.Path))
+		cookieText.WriteString(fmt.Sprintf("  Expires: %s\n", time.Unix(int64(cookie.Expires), 0)))
+		cookieText.WriteString(fmt.Sprintf("  Size: %d\n", cookie.Size))
+		cookieText.WriteString(fmt.Sprintf("  HttpOnly: %t\n", cookie.HTTPOnly))
+		cookieText.WriteString(fmt.Sprintf("  Secure: %t\n", cookie.Secure))
+		cookieText.WriteString(fmt.Sprintf("  Session: %t\n", cookie.Session))
+		cookieText.WriteString(fmt.Sprintf("  SameSite: %s\n", cookie.SameSite))
+		cookieText.WriteString(fmt.Sprintf("  Priority: %s\n", cookie.Priority))
+		cookieText.WriteString("----------------------------------------\n")
+	}
+
+	// Check if file exists and append to it
+	var fileContent []byte
+	if _, err := os.Stat(filepath); err == nil {
+		// File exists, read existing content
+		fileContent, err = os.ReadFile(filepath)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Append new content
+	fileContent = append(fileContent, []byte(cookieText.String())...)
+
+	// Write to file
+	if err := os.WriteFile(filepath, fileContent, 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// saveCookiesCSV saves cookies in CSV format
+func saveCookiesCSV(cookies []*network.Cookie, urlConfig config.URLConfig, stage string, urlDir string, viewport config.Viewport, screenshotType, timestamp string) error {
+	// Use a fixed filename for each URL
+	filename := fmt.Sprintf("%s-cookies.csv", sanitizeFilename(urlConfig.Name))
+	filepath := filepath.Join(urlDir, filename)
+
+	log.Printf("Saving cookies to CSV file: %s", filepath)
+
+	// Check if file exists and determine if we need to write headers
+	writeHeader := true
+	if _, err := os.Stat(filepath); err == nil {
+		writeHeader = false
+		log.Printf("CSV file exists, appending without headers")
+	} else {
+		log.Printf("CSV file does not exist, will create with headers")
+	}
+
+	// Open file for appending
+	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("ERROR: Failed to open CSV file: %v", err)
+		return err
+	}
+	defer file.Close()
+
+	// Write header if needed
+	if writeHeader {
+		headerLine := "Timestamp,URL,URL_Name,Stage,Screenshot_Type,Viewport,Cookie_Name,Cookie_Value,Domain,Path,Expires,Size,HttpOnly,Secure,Session,SameSite,Priority\n"
+		if _, err := file.WriteString(headerLine); err != nil {
+			log.Printf("ERROR: Failed to write CSV header: %v", err)
+			return err
+		}
+		log.Printf("Wrote CSV headers")
+	}
+
+	// Write cookie records
+	log.Printf("Writing %d cookies to CSV", len(cookies))
+	for _, cookie := range cookies {
+		// Escape fields that might contain commas
+		urlValue := strings.ReplaceAll(urlConfig.URL, ",", "\\,")
+		urlName := strings.ReplaceAll(urlConfig.Name, ",", "\\,")
+		cookieName := strings.ReplaceAll(cookie.Name, ",", "\\,")
+		cookieValue := strings.ReplaceAll(cookie.Value, ",", "\\,")
+		cookieDomain := strings.ReplaceAll(cookie.Domain, ",", "\\,")
+		cookiePath := strings.ReplaceAll(cookie.Path, ",", "\\,")
+
+		// Format expiration date
+		expiresStr := time.Unix(int64(cookie.Expires), 0).Format("2006-01-02 15:04:05")
+
+		// Create CSV line
+		line := fmt.Sprintf("%s,%s,%s,%s,%s,%dx%d,%s,%s,%s,%s,%s,%d,%t,%t,%t,%s,%s\n",
+			timestamp,
+			urlValue,
+			urlName,
+			stage,
+			screenshotType,
+			viewport.Width, viewport.Height,
+			cookieName,
+			cookieValue,
+			cookieDomain,
+			cookiePath,
+			expiresStr,
+			cookie.Size,
+			cookie.HTTPOnly,
+			cookie.Secure,
+			cookie.Session,
+			cookie.SameSite,
+			cookie.Priority)
+
+		if _, err := file.WriteString(line); err != nil {
+			return err
+		}
+	}
+
+	log.Printf("Successfully wrote cookies to CSV file")
+	return nil
 }
 
 // captureFullPageScreenshot captures a full page screenshot

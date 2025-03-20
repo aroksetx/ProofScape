@@ -98,10 +98,17 @@ func main() {
 				urlDelay = *delay
 			}
 
+			// Use default viewports if available, otherwise use a standard viewport
+			viewports := cfg.DefaultViewports
+			if len(viewports) == 0 {
+				// Use a standard viewport as fallback
+				viewports = []config.Viewport{{Width: 1280, Height: 800}}
+			}
+
 			cfg.URLs = append(cfg.URLs, config.URLConfig{
 				Name:      urlName,
 				URL:       *cmdUrl,
-				Viewports: []config.Viewport{},
+				Viewports: viewports,
 				Delay:     urlDelay,
 			})
 
@@ -120,10 +127,17 @@ func main() {
 					urlDelay = *delay
 				}
 
+				// Use default viewports if available, otherwise use a standard viewport
+				viewports := cfg.DefaultViewports
+				if len(viewports) == 0 {
+					// Use a standard viewport as fallback
+					viewports = []config.Viewport{{Width: 1280, Height: 800}}
+				}
+
 				cfg.URLs = append(cfg.URLs, config.URLConfig{
 					Name:      extractDomain(url),
 					URL:       url,
-					Viewports: []config.Viewport{},
+					Viewports: viewports,
 					Delay:     urlDelay,
 				})
 			}
