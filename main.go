@@ -72,13 +72,23 @@ func main() {
 	cmdUrl := flag.String("url", "", "Single URL to capture (overrides config file URLs)")
 	name := flag.String("name", "", "Name for the URL when using -url flag (defaults to domain)")
 	delay := flag.Int("delay", 0, "Delay in milliseconds for page loading when using -url flag (defaults to 1000)")
+	chromeMode := flag.String("chrome", "auto", "Chrome execution mode: 'local', 'docker', or 'auto'")
 	flag.Parse()
+
+	// Validate chrome mode flag
+	if *chromeMode != "auto" && *chromeMode != "local" && *chromeMode != "docker" {
+		log.Fatalf("Invalid chrome mode: %s. Must be 'auto', 'local', or 'docker'", *chromeMode)
+	}
 
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+
+	// Set chrome mode from command line
+	cfg.ChromeMode = *chromeMode
+	log.Printf("Using Chrome mode: %s", cfg.ChromeMode)
 
 	// Handle command-line URLs if provided
 	if *cmdUrl != "" || *cmdUrls != "" {

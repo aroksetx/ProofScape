@@ -60,6 +60,7 @@ type Config struct {
 	FileFormat       string          `json:"fileFormat"`
 	Quality          int             `json:"quality"`
 	Concurrency      int             `json:"concurrency"`
+	ChromeMode       string          `json:"-"` // Not parsed from JSON, set by command line
 }
 
 // LoadConfig loads configuration from a file

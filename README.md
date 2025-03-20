@@ -10,9 +10,11 @@ A robust Go application that automatically captures and analyzes screenshots of 
 - Customizable viewport dimensions
 - Configurable page loading delay times
 - Organized screenshot storage with consistent naming
+- **Improved Docker Chrome integration**: Uses chromedp's official headless-shell image
 - **Automatic Chrome fallback**: Uses local Chrome if available, otherwise tries Docker
 - **Cookie/localStorage management**: Set and track cookies and localStorage values
 - **CSV cookie logging**: Saves all cookie data in CSV format for easy analysis
+- **Enhanced error diagnostics**: Better error messages and container logs for troubleshooting
 
 ## Requirements
 
@@ -30,6 +32,13 @@ The tool automatically selects Chrome in this priority order:
 2. If Chrome is installed locally, use the local Chrome executable
 3. If Docker is installed, automatically start a Chrome container
 4. Fall back to default Chrome settings (which may fail if Chrome isn't installed)
+
+You can override this automatic selection using the `-chrome` command-line flag:
+```bash
+./screenshot-tool -chrome=local    # Force use of local Chrome executable
+./screenshot-tool -chrome=docker   # Force use of Docker Chrome container
+./screenshot-tool -chrome=auto     # Automatic selection (local, then Docker)
+```
 
 No configuration is required for the automatic fallback behavior - the tool will try to find the best available option.
 
@@ -75,17 +84,24 @@ This will connect to browserless.io's Chrome-as-a-service instead of requiring a
 
 #### 3. Docker Chrome
 
-You can also run Chrome in a Docker container:
+The tool now uses ChromeDP's official `chromedp/headless-shell` image, which is specifically designed to work with the ChromeDP library. When you use the `-chrome=docker` flag, the tool will:
+
+1. Check if a Chrome container is already running
+2. Start a new Chrome container if needed with the appropriate settings
+3. Verify that Chrome is responding before proceeding
+4. Apply necessary configurations for screenshot capture
+5. Clean up the container when finished (unless it was already running)
+
+No manual Docker setup is needed - simply use:
 
 ```bash
-docker run -d -p 9222:9222 browserless/chrome
+./screenshot-tool -chrome=docker -url="https://example.com"
 ```
 
-Then use:
-
-```bash
-export CHROME_PATH=http://localhost:9222
-```
+If there are issues with the Docker container, the tool will:
+- Capture and display container logs for troubleshooting
+- Provide detailed error messages about what went wrong
+- Automatically clean up non-responding containers
 
 ## Installation
 
@@ -129,10 +145,16 @@ go mod tidy
           "httpOnly": false
         }
       ],
-      "localStorage": {
-        "preferredLocation": "west-coast",
-        "userSettings": "{\"theme\":\"dark\"}"
-      }
+      "localStorage": [
+        {
+          "key": "preferredLocation",
+          "value": "west-coast"
+        },
+        {
+          "key": "userSettings",
+          "value": "{\"theme\":\"dark\"}"
+        }
+      ]
     }
   ],
   "urlList": ["https://github.com", "https://google.com"],
@@ -152,10 +174,16 @@ go mod tidy
       "httpOnly": false
     }
   ],
-  "defaultLocalStorage": {
-    "theme": "light",
-    "language": "en"
-  },
+  "defaultLocalStorage": [
+    {
+      "key": "theme",
+      "value": "light"
+    },
+    {
+      "key": "language",
+      "value": "en"
+    }
+  ],
   "outputDir": "./screenshots",
   "fileFormat": "png",
   "quality": 80,
@@ -193,6 +221,7 @@ go build -o screenshot-tool
 | `fileFormat` | Image format (png or jpeg) |
 | `quality` | Image quality (1-100) |
 | `concurrency` | Number of URLs to process simultaneously |
+| `chromeMode` | Chrome execution mode: "local", "docker", or "auto" |
 
 ### URL Object Options
 
@@ -203,7 +232,7 @@ go build -o screenshot-tool
 | `viewports` | Array of custom viewport dimensions (optional) |
 | `delay` | Page load delay in milliseconds (optional) |
 | `cookies` | Array of cookies to set before capturing (optional) |
-| `localStorage` | Object of localStorage key-value pairs to set (optional) |
+| `localStorage` | Array of localStorage key-value pairs to set (optional) |
 | `cookieProfileId` | ID of a cookie profile to apply (optional) |
 
 ### Cookie Object Options
@@ -216,6 +245,13 @@ go build -o screenshot-tool
 | `path` | Cookie path (optional, defaults to "/") |
 | `secure` | Whether cookie is secure (optional) |
 | `httpOnly` | Whether cookie is HTTP only (optional) |
+
+### LocalStorage Object Options
+
+| Option | Description |
+|--------|-------------|
+| `key` | LocalStorage key |
+| `value` | LocalStorage value |
 
 ### Cookie Profiles
 
@@ -276,13 +312,20 @@ Run the tool with various options:
 
 # Specify a custom name and delay for a URL
 ./screenshot-tool -url="https://example.com" -name="custom-name" -delay=2000
+
+# Choose Chrome execution mode: "local", "docker", or "auto" (default)
+./screenshot-tool -chrome=local    # Force use of local Chrome executable
+./screenshot-tool -chrome=docker   # Force use of Docker Chrome container
+./screenshot-tool -chrome=auto     # Automatic selection (local, then Docker)
 ```
 
-**Note**: When using the `-url` or `-urls` flags, the tool will use the default viewports specified in your configuration file. If no default viewports are configured, a standard 1280x800 viewport will be used as a fallback.
+**Notes**: 
+- When using the `-url` or `-urls` flags, the tool will use the default viewports specified in your configuration file. If no default viewports are configured, a standard 1280x800 viewport will be used as a fallback.
+- When using the `-chrome=docker` flag, the tool will automatically start a Docker Chrome container if one doesn't exist. No manual Docker setup is required.
 
 ## Command Line Examples
 
-Run with different cookie configurations:
+Run with different configurations:
 
 ```bash
 # Run with west coast configuration
@@ -293,6 +336,15 @@ Run with different cookie configurations:
 
 # To test with multiple specific URLs
 ./screenshot-tool -config=config-cookie-profiles.json -urls="https://example.com,https://google.com"
+
+# To run using Docker Chrome (automatically handles container setup)
+./screenshot-tool -chrome=docker -url="https://example.com"
+
+# To test regional differences using both Docker and cookie profiles
+./screenshot-tool -chrome=docker -config=config-cookie-profiles.json
+
+# To test with a custom output directory for specific regions
+./screenshot-tool -chrome=docker -config=dd.json
 ```
 
 ## Output
@@ -308,6 +360,22 @@ Screenshots and logs are saved in the specified output directory with the follow
     ...
     /{url-name}-cookies.log                # Cookie text log
     /{url-name}-cookies.csv                # Cookie CSV log
+```
+
+## Troubleshooting Docker Mode
+
+If you encounter issues when using `-chrome=docker` mode:
+
+1. **Docker not running**: Make sure Docker Desktop or Docker daemon is running
+2. **Port conflicts**: Check if port 9222 is already in use by another application
+3. **Container not responding**: The tool will automatically capture logs to help diagnose issues
+4. **Docker configuration issues**: Try resetting Docker to factory defaults if you have persistent problems
+5. **Resource constraints**: Ensure Docker has enough CPU/memory allocated in Docker Desktop settings
+
+You can manually run the Chrome container to test separately if needed:
+
+```bash
+docker run -d --rm --name chrome -p 9222:9222 --cap-add=SYS_ADMIN chromedp/headless-shell:latest
 ```
 
 ## License

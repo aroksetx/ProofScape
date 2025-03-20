@@ -98,32 +98,84 @@ func startDockerChrome() (string, error) {
 	// If container is already running, return its address
 	if len(output) > 0 {
 		log.Printf("Using existing Chrome container")
-		return "http://localhost:9222", nil
+
+		// Verify the existing container responds before continuing
+		if err := checkChromeResponseFromContainer(5); err != nil {
+			// Container exists but doesn't respond, stop and remove it
+			log.Printf("Existing Chrome container not responding, removing it: %v", err)
+			stopCmd := exec.Command("docker", "rm", "-f", "chrome")
+			stopCmd.Run() // Ignore errors, we'll try to recreate
+		} else {
+			return "http://localhost:9222", nil
+		}
 	}
 
-	// Start a new chrome container
+	// Start a new chrome container with improved configuration
 	log.Printf("Starting Chrome container...")
-	cmd = exec.Command("docker", "run", "-d", "--rm", "--name", "chrome", "-p", "9222:9222", "browserless/chrome")
+	cmd = exec.Command("docker", "run", "-d", "--rm", "--name", "chrome",
+		"-p", "9222:9222", // Using standard port 9222 for chromedp/headless-shell
+		"--cap-add=SYS_ADMIN",            // Add capabilities needed for Chrome
+		"chromedp/headless-shell:latest") // Use chromedp's official headless shell image
+
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to start chrome container: %w, output: %s", err, string(output))
 	}
 
-	// Wait for container to be ready
-	log.Printf("Waiting for Chrome container to be ready...")
-	time.Sleep(3 * time.Second)
+	// Wait for container to be ready with increased timeout
+	log.Printf("Waiting for Chrome container to be ready (this may take up to 20 seconds)...")
 
-	// Verify chrome is available
-	maxRetries := 5
-	for i := 0; i < maxRetries; i++ {
-		cmd = exec.Command("curl", "-s", "http://localhost:9222/json/version")
-		if output, err := cmd.CombinedOutput(); err == nil && strings.Contains(string(output), "webSocketDebuggerUrl") {
-			log.Printf("Chrome container is ready")
-			return "http://localhost:9222", nil
-		}
-		time.Sleep(1 * time.Second)
+	// Check if Chrome responds within timeout
+	if err := checkChromeResponseFromContainer(20); err != nil {
+		// Get container logs for diagnostics
+		logsCmd := exec.Command("docker", "logs", "chrome")
+		logs, _ := logsCmd.CombinedOutput()
+
+		// Stop the container since it's not working
+		stopCmd := exec.Command("docker", "rm", "-f", "chrome")
+		stopCmd.Run() // Ignore errors
+
+		return "", fmt.Errorf("chrome container started but not responding: %v\nContainer logs: %s",
+			err, string(logs))
 	}
 
-	return "", fmt.Errorf("chrome container started but not responding")
+	log.Printf("Chrome container is ready")
+	return "http://localhost:9222", nil
+}
+
+// checkChromeResponseFromContainer checks if Chrome is responding in the container
+// with the specified timeout in seconds
+func checkChromeResponseFromContainer(timeoutSeconds int) error {
+	// Try multiple times with increasing delay
+	maxRetries := timeoutSeconds
+	baseDelay := 1 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		// Try standard Chrome endpoint first
+		cmd := exec.Command("curl", "-s", "--max-time", "2", "http://localhost:9222/json/version")
+		output, err := cmd.CombinedOutput()
+
+		if err == nil && strings.Contains(string(output), "webSocketDebuggerUrl") {
+			// Chrome is responding properly
+			return nil
+		}
+
+		// Try browserless endpoint which might be different
+		cmd = exec.Command("curl", "-s", "--max-time", "2", "http://localhost:9222/json")
+		output, err = cmd.CombinedOutput()
+
+		if err == nil && len(output) > 0 && (strings.Contains(string(output), "webSocketDebuggerUrl") ||
+			strings.Contains(string(output), "browserless")) {
+			// Browserless is responding
+			return nil
+		}
+
+		// Increase delay slightly as we retry
+		delay := baseDelay + time.Duration(i*150)*time.Millisecond
+		log.Printf("Waiting for Chrome to be ready in container (attempt %d/%d)...", i+1, maxRetries)
+		time.Sleep(delay)
+	}
+
+	return fmt.Errorf("timeout after %d seconds", timeoutSeconds)
 }
 
 // Screenshoter handles the screenshot capturing logic
@@ -183,34 +235,64 @@ func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config
 	var cancelAlloc context.CancelFunc
 	var cancelBrowser context.CancelFunc
 
-	// Determine which Chrome implementation to use
-	// Priority: 1. Local Chrome, 2. Docker Chrome
-	// Try local Chrome first
-	if execPath, err := findChromeExecutable(); err == nil {
-		// Use local Chrome executable
-		log.Printf("Using local Chrome executable at: %s", execPath)
-		opts = append(opts, chromedp.ExecPath(execPath))
+	// Determine which Chrome implementation to use based on the specified mode
+	switch s.Config.ChromeMode {
+	case "local":
+		// Force use of local Chrome
+		if execPath, err := findChromeExecutable(); err == nil {
+			// Use local Chrome executable
+			log.Printf("Using local Chrome executable at: %s", execPath)
+			opts = append(opts, chromedp.ExecPath(execPath))
 
-		// Create allocator context with local Chrome
-		allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
-		defer cancelAlloc()
-	} else {
-		// Try Docker Chrome as fallback
-		log.Printf("Local Chrome not found: %v", err)
-		log.Printf("Attempting to use Docker Chrome...")
+			// Create allocator context with local Chrome
+			allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
+			defer cancelAlloc()
+		} else {
+			return fmt.Errorf("local Chrome mode specified but Chrome executable not found: %v", err)
+		}
 
+	case "docker":
+		// Force use of Docker Chrome
+		log.Printf("Docker Chrome mode specified, starting or connecting to Docker Chrome...")
 		if dockerURL, err := startDockerChrome(); err == nil {
 			// Use Docker Chrome
 			log.Printf("Using Docker Chrome at: %s", dockerURL)
+			// Use standard Chrome debugging protocol with chromedp/headless-shell
 			allocCtx, cancelAlloc = chromedp.NewRemoteAllocator(ctx, dockerURL)
 			defer cancelAlloc()
 		} else {
-			// Fallback to default Chrome as last resort
-			log.Printf("Docker Chrome failed: %v", err)
-			log.Printf("Falling back to default Chrome settings")
+			return fmt.Errorf("docker Chrome mode specified but failed to start or connect to Docker Chrome: %v", err)
+		}
 
+	default: // "auto" mode - try local, then Docker, then fallback
+		// Try local Chrome first
+		if execPath, err := findChromeExecutable(); err == nil {
+			// Use local Chrome executable
+			log.Printf("Using local Chrome executable at: %s", execPath)
+			opts = append(opts, chromedp.ExecPath(execPath))
+
+			// Create allocator context with local Chrome
 			allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
 			defer cancelAlloc()
+		} else {
+			// Try Docker Chrome as fallback
+			log.Printf("Local Chrome not found: %v", err)
+			log.Printf("Attempting to use Docker Chrome...")
+
+			if dockerURL, err := startDockerChrome(); err == nil {
+				// Use Docker Chrome
+				log.Printf("Using Docker Chrome at: %s", dockerURL)
+				// Use standard Chrome debugging protocol with chromedp/headless-shell
+				allocCtx, cancelAlloc = chromedp.NewRemoteAllocator(ctx, dockerURL)
+				defer cancelAlloc()
+			} else {
+				// Fallback to default Chrome as last resort
+				log.Printf("Docker Chrome failed: %v", err)
+				log.Printf("Falling back to default Chrome settings")
+
+				allocCtx, cancelAlloc = chromedp.NewExecAllocator(ctx, opts...)
+				defer cancelAlloc()
+			}
 		}
 	}
 
