@@ -8,10 +8,10 @@ import (
 
 // URLConfig represents configuration for a single URL to capture
 type URLConfig struct {
-	Name     string   `json:"name"`
-	URL      string   `json:"url"`
-	Viewport Viewport `json:"viewport,omitempty"`
-	Delay    int      `json:"delay,omitempty"` // Delay in milliseconds
+	Name      string     `json:"name"`
+	URL       string     `json:"url"`
+	Viewports []Viewport `json:"viewports,omitempty"`
+	Delay     int        `json:"delay,omitempty"` // Delay in milliseconds
 }
 
 // Viewport represents browser viewport dimensions
@@ -22,12 +22,12 @@ type Viewport struct {
 
 // Config represents the application configuration
 type Config struct {
-	URLs            []URLConfig `json:"urls"`
-	DefaultViewport Viewport    `json:"defaultViewport"`
-	OutputDir       string      `json:"outputDir"`
-	FileFormat      string      `json:"fileFormat"`
-	Quality         int         `json:"quality"`
-	Concurrency     int         `json:"concurrency"`
+	URLs             []URLConfig `json:"urls"`
+	DefaultViewports []Viewport  `json:"defaultViewports"`
+	OutputDir        string      `json:"outputDir"`
+	FileFormat       string      `json:"fileFormat"`
+	Quality          int         `json:"quality"`
+	Concurrency      int         `json:"concurrency"`
 }
 
 // LoadConfig loads configuration from a file
@@ -62,12 +62,15 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("no URLs specified in configuration")
 	}
 
-	// Set default viewport if not specified
-	if config.DefaultViewport.Width == 0 {
-		config.DefaultViewport.Width = 1280
-	}
-	if config.DefaultViewport.Height == 0 {
-		config.DefaultViewport.Height = 800
+	// Set default viewports if not specified or empty
+	if len(config.DefaultViewports) == 0 {
+		// Set default common viewport sizes (desktop, tablet, mobile)
+		config.DefaultViewports = []Viewport{
+			{Width: 1920, Height: 1080}, // Desktop large
+			{Width: 1366, Height: 768},  // Desktop common
+			{Width: 768, Height: 1024},  // Tablet portrait
+			{Width: 375, Height: 667},   // Mobile (iPhone)
+		}
 	}
 
 	// Set default output directory if not specified
@@ -108,12 +111,10 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("URL #%d is missing URL value", i+1)
 		}
 
-		// Set default viewport if not specified
-		if config.URLs[i].Viewport.Width == 0 {
-			config.URLs[i].Viewport.Width = config.DefaultViewport.Width
-		}
-		if config.URLs[i].Viewport.Height == 0 {
-			config.URLs[i].Viewport.Height = config.DefaultViewport.Height
+		// If no viewports specified for this URL, use the default viewports
+		if len(config.URLs[i].Viewports) == 0 {
+			config.URLs[i].Viewports = make([]Viewport, len(config.DefaultViewports))
+			copy(config.URLs[i].Viewports, config.DefaultViewports)
 		}
 
 		// Set default delay if not specified

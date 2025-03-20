@@ -220,6 +220,17 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 	tasks := []chromedp.Action{
 		chromedp.Navigate(urlConfig.URL),
 		chromedp.Sleep(time.Duration(urlConfig.Delay) * time.Millisecond),
+
+		// Scroll to bottom to load lazy content
+		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
+		chromedp.Sleep(1 * time.Second), // Wait for content to load
+
+		// Scroll back to top
+		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
+		chromedp.Sleep(1 * time.Second), // Wait for animations to complete
+
+		// Add additional delay to ensure all elements are loaded
+		chromedp.Sleep(2 * time.Second),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// Get page metrics
 			var metrics map[string]interface{}
@@ -265,6 +276,15 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(urlConfig.URL),
 		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
+
+		// Scroll to bottom to load lazy content
+		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
+		chromedp.Sleep(1*time.Second), // Wait for content to load
+
+		// Scroll back to top
+		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
+		chromedp.Sleep(1*time.Second), // Wait for animations to complete
+
 		chromedp.Evaluate(`Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)`, &pageHeight),
 	); err != nil {
 		return err
@@ -284,10 +304,20 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, urlConfig.Viewport.Width, urlConfig.Viewport.Height, i+1, s.Config.FileFormat)
 		filepath := filepath.Join(urlDir, filename)
 
-		// Scroll to position and capture screenshot
+		// Scroll to position and capture screenshot of only the viewport
 		if err := chromedp.Run(ctx,
+			// Scroll to position
 			chromedp.Evaluate(fmt.Sprintf(`window.scrollTo(0, %f)`, scrollPos), nil),
 			chromedp.Sleep(500*time.Millisecond), // Give time for any animations to complete
+
+			// Ensure device metrics are set to capture only viewport
+			emulation.SetDeviceMetricsOverride(int64(urlConfig.Viewport.Width), int64(urlConfig.Viewport.Height), 1, false).
+				WithScreenOrientation(&emulation.ScreenOrientation{
+					Type:  emulation.OrientationTypePortraitPrimary,
+					Angle: 0,
+				}),
+
+			// Capture only the viewport screenshot
 			chromedp.CaptureScreenshot(&buf),
 		); err != nil {
 			return err
