@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // URLConfig represents configuration for a single URL to capture
@@ -23,7 +24,9 @@ type Viewport struct {
 // Config represents the application configuration
 type Config struct {
 	URLs             []URLConfig `json:"urls"`
+	URLList          []string    `json:"urlList,omitempty"` // Simple list of URLs
 	DefaultViewports []Viewport  `json:"defaultViewports"`
+	DefaultDelay     int         `json:"defaultDelay,omitempty"` // Default delay for urlList items
 	OutputDir        string      `json:"outputDir"`
 	FileFormat       string      `json:"fileFormat"`
 	Quality          int         `json:"quality"`
@@ -57,6 +60,30 @@ func LoadConfig(path string) (*Config, error) {
 
 // validateConfig validates configuration and sets defaults
 func validateConfig(config *Config) error {
+	// Process URLList if provided
+	if len(config.URLList) > 0 {
+		// Set default delay if not specified
+		defaultDelay := 1000 // 1 second default
+		if config.DefaultDelay > 0 {
+			defaultDelay = config.DefaultDelay
+		}
+
+		// Convert URLList into URLConfig objects
+		for _, url := range config.URLList {
+			if url = strings.TrimSpace(url); url == "" {
+				continue
+			}
+
+			domainName := extractDomain(url)
+			config.URLs = append(config.URLs, URLConfig{
+				Name:      domainName,
+				URL:       url,
+				Viewports: []Viewport{},
+				Delay:     defaultDelay,
+			})
+		}
+	}
+
 	// Check if there are any URLs to process
 	if len(config.URLs) == 0 {
 		return fmt.Errorf("no URLs specified in configuration")
@@ -129,4 +156,31 @@ func validateConfig(config *Config) error {
 // ensureOutputDir ensures the output directory exists
 func ensureOutputDir(dir string) error {
 	return os.MkdirAll(dir, 0755)
+}
+
+// extractDomain extracts a domain name from a URL for use as a default name
+func extractDomain(url string) string {
+	// Remove protocol if present
+	if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	} else if strings.HasPrefix(url, "https://") {
+		url = url[8:]
+	}
+
+	// Remove www. prefix if present
+	if strings.HasPrefix(url, "www.") {
+		url = url[4:]
+	}
+
+	// Get domain part (stop at first slash)
+	if idx := strings.Index(url, "/"); idx > 0 {
+		url = url[:idx]
+	}
+
+	// Remove port if present
+	if idx := strings.Index(url, ":"); idx > 0 {
+		url = url[:idx]
+	}
+
+	return url
 }

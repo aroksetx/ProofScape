@@ -14,14 +14,14 @@
         }
       ],
       "delay": 1000
-    },
-    {
-      "name": "github",
-      "url": "https://github.com",
-      "viewports": [],
-      "delay": 2000
     }
   ],
+  "urlList": [
+    "https://github.com",
+    "https://google.com",
+    "https://twitter.com"
+  ],
+  "defaultDelay": 2000,
   "defaultViewports": [
     {
       "width": 1920,
@@ -43,5 +43,5 @@
   "outputDir": "./screenshots",
   "fileFormat": "png",
   "quality": 80,
-  "concurrency": 4
+  "concurrency": 6
 } 
