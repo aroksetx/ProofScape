@@ -114,8 +114,11 @@ func startDockerChrome() (string, error) {
 	log.Printf("Starting Chrome container...")
 	cmd = exec.Command("docker", "run", "-d", "--rm", "--name", "chrome",
 		"-p", "9222:9222", // Using standard port 9222 for chromedp/headless-shell
-		"--cap-add=SYS_ADMIN",            // Add capabilities needed for Chrome
-		"chromedp/headless-shell:latest") // Use chromedp's official headless shell image
+		"--cap-add=SYS_ADMIN",              // Add capabilities needed for Chrome
+		"chromedp/headless-shell:latest",   // Use chromedp's official headless shell image
+		"--disable-web-security",           // Disable web security for testing
+		"--ignore-certificate-errors",      // Ignore SSL certificate errors
+		"--allow-running-insecure-content") // Allow loading insecure content
 
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to start chrome container: %w, output: %s", err, string(output))
@@ -227,6 +230,7 @@ func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config
 		chromedp.DisableGPU,
 		chromedp.NoSandbox,
 		chromedp.Headless,
+		chromedp.Flag("ignore-certificate-errors", true),
 	)
 
 	// Define context variables here

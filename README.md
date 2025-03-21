@@ -15,6 +15,7 @@ A robust Go application that automatically captures and analyzes screenshots of 
 - **Cookie/localStorage management**: Set and track cookies and localStorage values
 - **CSV cookie logging**: Saves all cookie data in CSV format for easy analysis
 - **Enhanced error diagnostics**: Better error messages and container logs for troubleshooting
+- **SSL certificate error bypass**: Automatically handles invalid SSL certificates
 
 ## Requirements
 
@@ -377,6 +378,27 @@ You can manually run the Chrome container to test separately if needed:
 ```bash
 docker run -d --rm --name chrome -p 9222:9222 --cap-add=SYS_ADMIN chromedp/headless-shell:latest
 ```
+
+## SSL Certificate Handling
+
+The tool is configured to automatically bypass SSL certificate validation errors (such as `NET::ERR_CERT_AUTHORITY_INVALID`). This allows capturing screenshots from sites with:
+
+- Self-signed certificates
+- Expired certificates
+- Certificates from untrusted authorities
+- Domain/certificate mismatches
+
+This behavior is enabled by default for both local Chrome and Docker Chrome modes, using the following security bypass settings:
+
+```
+--ignore-certificate-errors     # Bypass certificate validation
+--disable-web-security          # Disable same-origin policy
+--allow-running-insecure-content # Allow mixed content (HTTP content in HTTPS pages)
+```
+
+These settings ensure screenshots can be captured from any site regardless of certificate issues.
+
+> **Note**: These security bypasses are intended for testing/screenshot purposes only, and should not be used for general browsing.
 
 ## License
 
