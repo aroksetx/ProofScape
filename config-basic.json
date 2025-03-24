@@ -1,0 +1,71 @@
+{
+  "urls": [
+    {
+      "name": "example-site",
+      "url": "https://www.capitalgroup.com/advisor/investments/exchange-traded-funds/details/cgcp",
+      "viewports": [
+        {
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "width": 768,
+          "height": 1024
+        },
+        {
+          "width": 375,
+          "height": 667
+        }
+      ],
+      "delay": 1000,
+      "cookies": [
+        {
+          "name": "georegion",
+          "value": "use1",
+          "path": "/",
+          "secure": false,
+          "httpOnly": false
+        }
+      ],
+      "localStorage": [
+        {
+          "key": "theme",
+          "value": "light"
+        }
+      ]
+    }
+  ],
+  "urlList": [
+    "https://www.capitalgroup.com/advisor/investments/exchange-traded-funds/details/cgcp"
+  ],
+  "defaultViewports": [
+    {
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "width": 768,
+      "height": 1024
+    },
+    {
+      "width": 375,
+      "height": 667
+    }
+  ],
+  "defaultCookies": [
+    {
+      "name": "georegion",
+      "value": "use1",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false
+    }
+  ],
+  "viewproof": [
+    "georegion"
+  ],
+  "outputDir": "./screenshots",
+  "fileFormat": "png",
+  "quality": 90,
+  "concurrency": 4
+}

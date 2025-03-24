@@ -10,12 +10,11 @@ A robust Go application that automatically captures and analyzes screenshots of 
 - Customizable viewport dimensions
 - Configurable page loading delay times
 - Organized screenshot storage with consistent naming
-- **Improved Docker Chrome integration**: Uses chromedp's official headless-shell image
-- **Automatic Chrome fallback**: Uses local Chrome if available, otherwise tries Docker
-- **Cookie/localStorage management**: Set and track cookies and localStorage values
-- **CSV cookie logging**: Saves all cookie data in CSV format for easy analysis
-- **Enhanced error diagnostics**: Better error messages and container logs for troubleshooting
-- **SSL certificate error bypass**: Automatically handles invalid SSL certificates
+- Cookie/localStorage management with automatic refresh after setting
+- ViewProof overlay for validation of cookies and localStorage values
+- CSV cookie logging for easy analysis
+- Enhanced error diagnostics with better error messages
+- SSL certificate error bypass for testing environments
 
 ## Requirements
 
@@ -23,25 +22,21 @@ A robust Go application that automatically captures and analyzes screenshots of 
 - One of the following:
   - Chrome/Chromium browser installed locally
   - Docker installed (for automatic Docker Chrome fallback)
-  - Browserless.io account (optional)
 
 ### Chrome Selection Logic
 
 The tool automatically selects Chrome in this priority order:
 
-1. If `BROWSERLESS_TOKEN` environment variable is set, use browserless.io
-2. If Chrome is installed locally, use the local Chrome executable
-3. If Docker is installed, automatically start a Chrome container
-4. Fall back to default Chrome settings (which may fail if Chrome isn't installed)
+1. If Chrome is installed locally, use the local Chrome executable
+2. If Docker is installed, automatically start a Chrome container
+3. Fall back to default Chrome settings
 
 You can override this automatic selection using the `-chrome` command-line flag:
 ```bash
-./screenshot-tool -chrome=local    # Force use of local Chrome executable
-./screenshot-tool -chrome=docker   # Force use of Docker Chrome container
-./screenshot-tool -chrome=auto     # Automatic selection (local, then Docker)
+go run main.go -chrome=local    # Force use of local Chrome executable
+go run main.go -chrome=docker   # Force use of Docker Chrome container
+go run main.go -chrome=auto     # Automatic selection (local, then Docker)
 ```
-
-No configuration is required for the automatic fallback behavior - the tool will try to find the best available option.
 
 ### Local Chrome Installation
 
@@ -69,23 +64,9 @@ If your Chrome installation is in a non-standard location, you can set the `CHRO
 export CHROME_PATH=/path/to/your/chrome
 ```
 
-#### 2. Serverless Chrome (Browserless.io)
+### Docker Chrome
 
-For environments where installing Chrome is not feasible (like serverless deployments), you can use browserless.io:
-
-1. Sign up for a [browserless.io](https://browserless.io) account
-2. Get your API token
-3. Set the environment variable:
-
-```bash
-export BROWSERLESS_TOKEN=your-token-here
-```
-
-This will connect to browserless.io's Chrome-as-a-service instead of requiring a local installation.
-
-#### 3. Docker Chrome
-
-The tool now uses ChromeDP's official `chromedp/headless-shell` image, which is specifically designed to work with the ChromeDP library. When you use the `-chrome=docker` flag, the tool will:
+The tool uses ChromeDP's official `chromedp/headless-shell` image, which is specifically designed to work with the ChromeDP library. When you use the `-chrome=docker` flag, the tool will:
 
 1. Check if a Chrome container is already running
 2. Start a new Chrome container if needed with the appropriate settings
@@ -96,13 +77,8 @@ The tool now uses ChromeDP's official `chromedp/headless-shell` image, which is 
 No manual Docker setup is needed - simply use:
 
 ```bash
-./screenshot-tool -chrome=docker -url="https://example.com"
+go run main.go -chrome=docker -config=config-basic.json
 ```
-
-If there are issues with the Docker container, the tool will:
-- Capture and display container logs for troubleshooting
-- Provide detailed error messages about what went wrong
-- Automatically clean up non-responding containers
 
 ## Installation
 
@@ -119,12 +95,46 @@ go mod tidy
 
 ## Usage
 
-1. Configure the URLs and settings in `config.json`:
+The tool provides two configuration files to get you started:
+
+- **config-basic.json**: A simple configuration for basic usage
+- **config-advanced.json**: A comprehensive configuration with advanced features like ViewProof
+
+### Basic Configuration
+
+For simple usage, start with the basic configuration:
+
+```bash
+go run main.go -config=config-basic.json
+```
+
+The basic configuration includes:
+- A single URL with multiple viewport sizes
+- Basic cookie and localStorage management
+- Common screenshot settings
+
+### Advanced Configuration
+
+For more complex scenarios, use the advanced configuration:
+
+```bash
+go run main.go -config=config-advanced.json
+```
+
+The advanced configuration includes:
+- Multiple URLs with different settings
+- ViewProof functionality to validate cookies and localStorage
+- More comprehensive cookie management
+- Mobile viewport sizes
+
+### Configuration Files
+
+1. Example of `config-basic.json`:
 ```json
 {
   "urls": [
     {
-      "name": "example-homepage",
+      "name": "example-site",
       "url": "https://example.com",
       "viewports": [
         {
@@ -139,70 +149,42 @@ go mod tidy
       "delay": 1000,
       "cookies": [
         {
-          "name": "location",
-          "value": "west-coast",
+          "name": "session",
+          "value": "test-session",
           "path": "/",
           "secure": false,
           "httpOnly": false
         }
-      ],
-      "localStorage": [
-        {
-          "key": "preferredLocation",
-          "value": "west-coast"
-        },
-        {
-          "key": "userSettings",
-          "value": "{\"theme\":\"dark\"}"
-        }
       ]
     }
   ],
-  "urlList": ["https://github.com", "https://google.com"],
-  "defaultDelay": 2000,
   "defaultViewports": [
     {
       "width": 1920,
       "height": 1080
+    },
+    {
+      "width": 768,
+      "height": 1024
     }
   ],
   "defaultCookies": [
     {
-      "name": "session",
-      "value": "test-session",
+      "name": "region",
+      "value": "us-east-1",
       "path": "/",
       "secure": false,
       "httpOnly": false
     }
   ],
-  "defaultLocalStorage": [
-    {
-      "key": "theme",
-      "value": "light"
-    },
-    {
-      "key": "language",
-      "value": "en"
-    }
-  ],
   "outputDir": "./screenshots",
   "fileFormat": "png",
-  "quality": 80,
-  "concurrency": 2
+  "quality": 90,
+  "concurrency": 4
 }
 ```
 
-2. Run the tool:
-```bash
-go run main.go
-```
-
-Or with a custom configuration file:
-```bash
-go run main.go -config=custom-config.json
-```
-
-3. Build the tool:
+2. Build the tool:
 ```bash
 go build -o screenshot-tool
 ```
@@ -212,12 +194,8 @@ go build -o screenshot-tool
 | Option | Description |
 |--------|-------------|
 | `urls` | Array of URL objects to process |
-| `urlList` | Simple array of URLs to process (uses defaults) |
 | `defaultViewports` | Array of default viewport dimensions |
-| `defaultDelay` | Default page load delay in milliseconds |
 | `defaultCookies` | Default cookies to set for all URLs |
-| `defaultLocalStorage` | Default localStorage values to set for all URLs |
-| `cookieProfiles` | Named sets of cookies and localStorage values |
 | `viewproof` | List of cookie/localStorage keys to extract and display in screenshots |
 | `outputDir` | Directory to save screenshots |
 | `fileFormat` | Image format (png or jpeg) |
@@ -235,7 +213,6 @@ go build -o screenshot-tool
 | `delay` | Page load delay in milliseconds (optional) |
 | `cookies` | Array of cookies to set before capturing (optional) |
 | `localStorage` | Array of localStorage key-value pairs to set (optional) |
-| `cookieProfileId` | ID of a cookie profile to apply (optional) |
 
 ### Cookie Object Options
 
@@ -248,232 +225,42 @@ go build -o screenshot-tool
 | `secure` | Whether cookie is secure (optional) |
 | `httpOnly` | Whether cookie is HTTP only (optional) |
 
-### LocalStorage Object Options
+## ViewProof Feature
 
-| Option | Description |
-|--------|-------------|
-| `key` | LocalStorage key |
-| `value` | LocalStorage value |
+The ViewProof feature allows you to overlay key cookie and localStorage values directly on screenshots, making it easy to validate that specific values are being applied correctly. To use this feature:
 
-### Cookie Profiles
+1. Set the `viewproof` array in your configuration with the keys you want to monitor
+2. Run the tool as normal
+3. The tool will generate full-proof screenshots with these values displayed
 
-Cookie profiles allow you to define named sets of cookies and localStorage values that can be reused across multiple URLs. This is especially useful for testing the same site with different regional or user settings.
+This is particularly useful for:
+- Validating geo-region targeting
+- Confirming A/B test assignments
+- Verifying user preferences are being applied
 
-Benefits of cookie profiles:
-- **Reusability**: Define a set of cookies once, use it for multiple URLs
-- **Maintainability**: Update cookies in one place
-- **Organization**: Group related cookies/localStorage together
-- **A/B Testing**: Easily switch between different site configurations
-
-### Priority Order for Cookies
-
-The tool applies cookies in this priority order:
-
-1. URL-specific cookies (highest priority)
-2. Cookie profile cookies (if the URL has a `cookieProfileId` and no URL-specific cookies)
-3. Default cookies (lowest priority, applied if no URL-specific cookies or profile)
-
-### Cookie Logging
-
-The tool creates log files for cookies in two formats:
-
-#### Text Log Format
-For human-readable analysis, the tool creates a text log file for each URL:
-- Shows cookies before and after your custom cookies are set
-- Records viewport size and screenshot type for each entry
-- Lists cookies that will be applied in the "before" stage
-- Shows complete details for all cookies
-
-#### CSV Log Format
-For data analysis and processing, the tool also saves cookies in CSV format:
-- Contains all cookie parameters in a structured format
-- Includes metadata like URL, timestamp, viewport size, and screenshot stage
-- Makes it easy to analyze cookies across different URLs and stages
-- Can be imported into spreadsheets or data analysis tools
-
-Log files are saved at:
-- Text logs: `./screenshots/{url-name}/{url-name}-cookies.log`
-- CSV logs: `./screenshots/{url-name}/{url-name}-cookies.csv`
-
-### ViewProof Feature
-
-The ViewProof feature allows you to visually verify cookie and localStorage values directly in screenshots. This is particularly useful for:
-
-- Debugging cookie and localStorage issues
-- Verifying that cookies are properly set and maintained
-- Documenting application state during testing
-- Creating evidence of user preferences or settings
-
-When ViewProof is configured, the tool will:
-1. Extract the specified cookie and localStorage values before making any changes
-2. Inject a floating information panel into the page
-3. Display the key-value pairs in this panel
-4. Capture the screenshot with this information visible
-
-#### Configuration
-
-Add the `viewproof` array to your config file with the keys you want to monitor:
-
+Example ViewProof configuration:
 ```json
-{
-  "urls": [ ... ],
-  "viewproof": [
-    "user_session",
-    "preferences",
-    "last_visit",
-    "theme_preference"
-  ],
-  "outputDir": "./screenshots",
-  ...
-}
+"viewproof": ["user_region", "gdpr-consent", "user_preferences"]
 ```
 
-The tool will automatically look for these keys in both cookies and localStorage, displaying any matches it finds.
+## Output Organization
 
-#### Example
-
-To verify that a site correctly sets user preferences cookies:
-
-```json
-{
-  "urls": [
-    {
-      "name": "example-with-cookies",
-      "url": "https://example.com",
-      "cookies": [
-        {
-          "name": "user_session",
-          "value": "test-session-value-123"
-        },
-        {
-          "name": "preferences",
-          "value": "theme=dark"
-        }
-      ],
-      "localStorage": [
-        {
-          "key": "user_settings",
-          "value": "{\"theme\":\"dark\",\"fontSize\":16}"
-        }
-      ]
-    }
-  ],
-  "viewproof": [
-    "user_session",
-    "preferences",
-    "user_settings"
-  ]
-}
-```
-
-The resulting screenshots will include a floating panel showing the values of these keys before any modifications were made.
-
-## Command Line Options
-
-Run the tool with various options:
-
-```bash
-# Basic usage with configuration file
-./screenshot-tool
-
-# Use a specific configuration file
-./screenshot-tool -config=custom-config.json
-
-# Test a specific URL (uses default viewports from config or 1280x800 if none defined)
-./screenshot-tool -url="https://example.com"
-
-# Test multiple URLs
-./screenshot-tool -urls="https://example.com,https://google.com"
-
-# Specify a custom name and delay for a URL
-./screenshot-tool -url="https://example.com" -name="custom-name" -delay=2000
-
-# Choose Chrome execution mode: "local", "docker", or "auto" (default)
-./screenshot-tool -chrome=local    # Force use of local Chrome executable
-./screenshot-tool -chrome=docker   # Force use of Docker Chrome container
-./screenshot-tool -chrome=auto     # Automatic selection (local, then Docker)
-```
-
-**Notes**: 
-- When using the `-url` or `-urls` flags, the tool will use the default viewports specified in your configuration file. If no default viewports are configured, a standard 1280x800 viewport will be used as a fallback.
-- When using the `-chrome=docker` flag, the tool will automatically start a Docker Chrome container if one doesn't exist. No manual Docker setup is required.
-
-## Command Line Examples
-
-Run with different configurations:
-
-```bash
-# Run with west coast configuration
-./screenshot-tool -config=config-cookie-profiles.json
-
-# To test different specific URLs only
-./screenshot-tool -config=config-cookie-profiles.json -url="https://example.com"
-
-# To test with multiple specific URLs
-./screenshot-tool -config=config-cookie-profiles.json -urls="https://example.com,https://google.com"
-
-# To run using Docker Chrome (automatically handles container setup)
-./screenshot-tool -chrome=docker -url="https://example.com"
-
-# To test regional differences using both Docker and cookie profiles
-./screenshot-tool -chrome=docker -config=config-cookie-profiles.json
-
-# To test with a custom output directory for specific regions
-./screenshot-tool -chrome=docker -config=dd.json
-```
-
-## Output
-
-Screenshots and logs are saved in the specified output directory with the following structure:
+Screenshots are saved in the following directory structure:
 
 ```
-/outputDir
-  /{url-name}/
-    /{timestamp}-full-{width}x{height}.{format}     # Full page screenshot
-    /{timestamp}-viewport-{width}x{height}-1.{format}  # First viewport section
-    /{timestamp}-viewport-{width}x{height}-2.{format}  # Second viewport section
-    ...
-    /{url-name}-cookies.log                # Cookie text log
-    /{url-name}-cookies.csv                # Cookie CSV log
+outputDir/
+  └── urlName_timestamp/
+      ├── viewportWidth×viewportHeight/
+      │   ├── timestamp-full-widthxheight.png
+      │   ├── timestamp-viewport-widthxheight-1.png
+      │   ├── timestamp-viewport-widthxheight-2.png
+      │   └── ...
+      └── urlName-cookies.csv
 ```
 
-## Troubleshooting Docker Mode
+Each viewport gets its own directory, containing:
+- A full-page screenshot
+- Individual viewport screenshots
+- A ViewProof screenshot if configured
 
-If you encounter issues when using `-chrome=docker` mode:
-
-1. **Docker not running**: Make sure Docker Desktop or Docker daemon is running
-2. **Port conflicts**: Check if port 9222 is already in use by another application
-3. **Container not responding**: The tool will automatically capture logs to help diagnose issues
-4. **Docker configuration issues**: Try resetting Docker to factory defaults if you have persistent problems
-5. **Resource constraints**: Ensure Docker has enough CPU/memory allocated in Docker Desktop settings
-
-You can manually run the Chrome container to test separately if needed:
-
-```bash
-docker run -d --rm --name chrome -p 9222:9222 --cap-add=SYS_ADMIN chromedp/headless-shell:latest
-```
-
-## SSL Certificate Handling
-
-The tool is configured to automatically bypass SSL certificate validation errors (such as `NET::ERR_CERT_AUTHORITY_INVALID`). This allows capturing screenshots from sites with:
-
-- Self-signed certificates
-- Expired certificates
-- Certificates from untrusted authorities
-- Domain/certificate mismatches
-
-This behavior is enabled by default for both local Chrome and Docker Chrome modes, using the following security bypass settings:
-
-```
---ignore-certificate-errors     # Bypass certificate validation
---disable-web-security          # Disable same-origin policy
---allow-running-insecure-content # Allow mixed content (HTTP content in HTTPS pages)
-```
-
-These settings ensure screenshots can be captured from any site regardless of certificate issues.
-
-> **Note**: These security bypasses are intended for testing/screenshot purposes only, and should not be used for general browsing.
-
-## License
-
-MIT 
+Cookie data is saved to a CSV file for easy analysis. 

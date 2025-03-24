@@ -1,0 +1,113 @@
+{
+  "urls": [
+    {
+      "name": "example-homepage",
+      "url": "https://example.com",
+      "viewports": [
+        {
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "width": 768,
+          "height": 1024
+        }
+      ],
+      "delay": 500,
+      "cookies": [
+        {
+          "name": "user_region",
+          "value": "us-west-1",
+          "path": "/"
+        },
+        {
+          "name": "user_preferences",
+          "value": "dark_mode=true",
+          "path": "/"
+        }
+      ],
+      "localStorage": [
+        {
+          "key": "theme",
+          "value": "dark"
+        },
+        {
+          "key": "language",
+          "value": "en-US"
+        }
+      ]
+    },
+    {
+      "name": "example-product",
+      "url": "https://example.com/product",
+      "viewports": [
+        {
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "width": 768,
+          "height": 1024
+        },
+        {
+          "width": 375,
+          "height": 667
+        }
+      ],
+      "delay": 800,
+      "cookies": [
+        {
+          "name": "user_region",
+          "value": "eu-west-1",
+          "path": "/"
+        },
+        {
+          "name": "gdpr-consent",
+          "value": "true",
+          "path": "/"
+        }
+      ]
+    }
+  ],
+  "defaultViewports": [
+    {
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "width": 768,
+      "height": 1024
+    },
+    {
+      "width": 375,
+      "height": 667
+    }
+  ],
+  "defaultCookies": [
+    {
+      "name": "session_id",
+      "value": "test-session-123",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false
+    },
+    {
+      "name": "analytics_consent",
+      "value": "true",
+      "path": "/",
+      "secure": true,
+      "httpOnly": false
+    }
+  ],
+  "viewproof": [
+    "user_region",
+    "gdpr-consent",
+    "user_preferences",
+    "session_id"
+  ],
+  "outputDir": "./screenshots",
+  "fileFormat": "png",
+  "quality": 90,
+  "concurrency": 4,
+  "chromeMode": "auto"
+} 
