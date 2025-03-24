@@ -218,6 +218,7 @@ go build -o screenshot-tool
 | `defaultCookies` | Default cookies to set for all URLs |
 | `defaultLocalStorage` | Default localStorage values to set for all URLs |
 | `cookieProfiles` | Named sets of cookies and localStorage values |
+| `viewproof` | List of cookie/localStorage keys to extract and display in screenshots |
 | `outputDir` | Directory to save screenshots |
 | `fileFormat` | Image format (png or jpeg) |
 | `quality` | Image quality (1-100) |
@@ -293,6 +294,79 @@ For data analysis and processing, the tool also saves cookies in CSV format:
 Log files are saved at:
 - Text logs: `./screenshots/{url-name}/{url-name}-cookies.log`
 - CSV logs: `./screenshots/{url-name}/{url-name}-cookies.csv`
+
+### ViewProof Feature
+
+The ViewProof feature allows you to visually verify cookie and localStorage values directly in screenshots. This is particularly useful for:
+
+- Debugging cookie and localStorage issues
+- Verifying that cookies are properly set and maintained
+- Documenting application state during testing
+- Creating evidence of user preferences or settings
+
+When ViewProof is configured, the tool will:
+1. Extract the specified cookie and localStorage values before making any changes
+2. Inject a floating information panel into the page
+3. Display the key-value pairs in this panel
+4. Capture the screenshot with this information visible
+
+#### Configuration
+
+Add the `viewproof` array to your config file with the keys you want to monitor:
+
+```json
+{
+  "urls": [ ... ],
+  "viewproof": [
+    "user_session",
+    "preferences",
+    "last_visit",
+    "theme_preference"
+  ],
+  "outputDir": "./screenshots",
+  ...
+}
+```
+
+The tool will automatically look for these keys in both cookies and localStorage, displaying any matches it finds.
+
+#### Example
+
+To verify that a site correctly sets user preferences cookies:
+
+```json
+{
+  "urls": [
+    {
+      "name": "example-with-cookies",
+      "url": "https://example.com",
+      "cookies": [
+        {
+          "name": "user_session",
+          "value": "test-session-value-123"
+        },
+        {
+          "name": "preferences",
+          "value": "theme=dark"
+        }
+      ],
+      "localStorage": [
+        {
+          "key": "user_settings",
+          "value": "{\"theme\":\"dark\",\"fontSize\":16}"
+        }
+      ]
+    }
+  ],
+  "viewproof": [
+    "user_session",
+    "preferences",
+    "user_settings"
+  ]
+}
+```
+
+The resulting screenshots will include a floating panel showing the values of these keys before any modifications were made.
 
 ## Command Line Options
 

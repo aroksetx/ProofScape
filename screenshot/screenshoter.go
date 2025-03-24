@@ -198,12 +198,130 @@ func NewScreenshoter(cfg *config.Config) *Screenshoter {
 	}
 }
 
+// setCookiesAndLocalStorage sets cookies and localStorage items for a URL and refreshes the page
+func (s *Screenshoter) setCookiesAndLocalStorage(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir, stage string, screenshotType string) chromedp.ActionFunc {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		// Check if these are defaultCookies (applied from config)
+		defaultCookiesApplied := false
+		if len(urlConfig.Cookies) > 0 && (stage == "before" || stage == "before-viewport") {
+			defaultCookiesApplied = true
+			log.Printf("Setting cookies from DefaultCookies configuration")
+		}
+
+		// Add cookies if specified
+		if len(urlConfig.Cookies) > 0 {
+			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
+
+			// Get existing cookies first
+			existingCookies, err := storage.GetCookies().Do(ctx)
+			if err != nil {
+				log.Printf("ERROR: Failed to get existing cookies: %v", err)
+				return err
+			}
+
+			// Create a map of existing cookies for quick lookup
+			existingCookieMap := make(map[string]string)
+			for _, cookie := range existingCookies {
+				key := cookie.Name + cookie.Path + cookie.Domain
+				existingCookieMap[key] = cookie.Value
+			}
+
+			// Create cookie expiration (180 days)
+			expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
+
+			for _, cookie := range urlConfig.Cookies {
+				// Extract domain from URL if not specified in cookie
+				domain := cookie.Domain
+				if domain == "" {
+					// Use the URL's domain
+					domain = extractDomainFromURL(urlConfig.URL)
+				}
+
+				// Set cookie path to root if not specified
+				path := cookie.Path
+				if path == "" {
+					path = "/"
+				}
+
+				// Check if this cookie already exists with the same value
+				key := cookie.Name + path + domain
+				if value, exists := existingCookieMap[key]; exists && value == cookie.Value {
+					log.Printf("Cookie %s already exists with the same value, skipping", cookie.Name)
+					continue
+				}
+
+				err := network.SetCookie(cookie.Name, cookie.Value).
+					WithExpires(&expr).
+					WithDomain(domain).
+					WithPath(path).
+					WithHTTPOnly(cookie.HTTPOnly).
+					WithSecure(cookie.Secure).
+					Do(ctx)
+
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		// Set localStorage values if specified
+		if len(urlConfig.LocalStorage) > 0 {
+			log.Printf("Setting %d localStorage items for %s", len(urlConfig.LocalStorage), urlConfig.Name)
+			for _, storage := range urlConfig.LocalStorage {
+				jsScript := fmt.Sprintf(`
+				(function() {
+					const existingValue = localStorage.getItem("%s");
+					if (existingValue === "%s") {
+						console.log("localStorage key %s already has the same value, skipping");
+						return;
+					}
+					localStorage.setItem("%s", "%s");
+				})()`,
+					escapeJSString(storage.Key),
+					escapeJSString(storage.Value),
+					escapeJSString(storage.Key),
+					escapeJSString(storage.Key),
+					escapeJSString(storage.Value))
+				if err := chromedp.Evaluate(jsScript, nil).Do(ctx); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Always refresh the page after setting cookies/localStorage to ensure they are applied
+		log.Printf("Refreshing page to ensure cookies and localStorage are applied")
+		if err := chromedp.Reload().Do(ctx); err != nil {
+			return err
+		}
+
+		// Extra refresh for DefaultCookies to ensure they're fully applied
+		if defaultCookiesApplied {
+			log.Printf("Adding extra refresh to ensure DefaultCookies are fully applied")
+			if err := chromedp.Sleep(500 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
+			if err := chromedp.Reload().Do(ctx); err != nil {
+				return err
+			}
+		}
+
+		// Wait for page to load after refresh
+		if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
+			return err
+		}
+
+		// Log cookies after setting our custom ones
+		return SaveCookiesToFile(ctx, urlConfig, stage, urlDir, viewport, screenshotType).Do(ctx)
+	})
+}
+
 // CaptureURL captures screenshots for a given URL with all configured viewports
 func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfig) error {
 	// Create context with timeout - increase for complex pages
 	// Calculate a longer timeout based on the number of viewports and complexity
 	viewportsCount := len(urlConfig.Viewports)
-	timeoutDuration := time.Duration(urlConfig.Delay*3+60000*viewportsCount) * time.Millisecond
+	// Increase timeout calculation: base time (120s) + time per viewport (90s) * number of viewports
+	timeoutDuration := 120*time.Second + time.Duration(90*viewportsCount)*time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
@@ -214,7 +332,7 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 	// Create a unique directory name using both the URL name and timestamp
 	uniqueDirName := fmt.Sprintf("%s_%s", sanitizeFilename(urlConfig.Name), timestamp)
 
-	// Create directory for this URL
+	// Create base directory for this URL
 	urlDir := filepath.Join(s.Config.OutputDir, uniqueDirName)
 	if err := os.MkdirAll(urlDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory for URL %s: %w", urlConfig.Name, err)
@@ -222,10 +340,22 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 
 	log.Printf("Created unique directory for %s: %s", urlConfig.Name, uniqueDirName)
 
+	// Check if ViewProof is needed
+	viewproofNeeded := len(s.Config.ViewProof) > 0
+
 	// Process each viewport for this URL
-	for _, viewport := range urlConfig.Viewports {
+	for i, viewport := range urlConfig.Viewports {
+		// Create subdirectory for this viewport
+		viewportDirName := fmt.Sprintf("%dx%d", viewport.Width, viewport.Height)
+		viewportDir := filepath.Join(urlDir, viewportDirName)
+		if err := os.MkdirAll(viewportDir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory for viewport %s: %w", viewportDirName, err)
+		}
+
 		log.Printf("Capturing screenshots for %s at viewport %dx%d", urlConfig.Name, viewport.Width, viewport.Height)
-		if err := s.captureWithViewport(ctx, urlConfig, viewport, urlDir, true); err != nil {
+
+		// Standard capture for all viewports (with the special ViewProof for the first viewport)
+		if err := s.captureWithViewport(ctx, urlConfig, viewport, viewportDir, true, viewproofNeeded && i == 0); err != nil {
 			return fmt.Errorf("failed to capture screenshots for %s at viewport %dx%d: %w",
 				urlConfig.Name, viewport.Width, viewport.Height, err)
 		}
@@ -235,7 +365,7 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 }
 
 // captureWithViewport captures screenshots for a specific viewport size
-func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string, captureViewports bool) error {
+func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, viewportDir string, captureViewports bool, withViewProof bool) error {
 	// Create browser options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.WindowSize(viewport.Width, viewport.Height),
@@ -316,15 +446,22 @@ func (s *Screenshoter) captureWithViewport(ctx context.Context, urlConfig config
 	browserCtx, cancelBrowser = chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
 	defer cancelBrowser()
 
+	// If withViewProof is true, capture a full page screenshot with ViewProof first
+	if withViewProof {
+		if err := s.captureFullPageWithViewProof(browserCtx, urlConfig, viewport, viewportDir); err != nil {
+			return fmt.Errorf("failed to capture full-proof screenshot: %w", err)
+		}
+	}
+
 	// Capture full page screenshot
-	if err := s.captureFullPageScreenshot(browserCtx, urlConfig, viewport, urlDir); err != nil {
+	if err := s.captureFullPageScreenshot(browserCtx, urlConfig, viewport, viewportDir); err != nil {
 		return fmt.Errorf("failed to capture full page screenshot for %s at viewport %dx%d: %w",
 			urlConfig.Name, viewport.Width, viewport.Height, err)
 	}
 
 	// Capture viewport screenshots if requested
 	if captureViewports {
-		if err := s.captureViewportScreenshots(browserCtx, urlConfig, viewport, urlDir); err != nil {
+		if err := s.captureViewportScreenshots(browserCtx, urlConfig, viewport, viewportDir, true); err != nil {
 			return fmt.Errorf("failed to capture viewport screenshots for %s at viewport %dx%d: %w",
 				urlConfig.Name, viewport.Width, viewport.Height, err)
 		}
@@ -512,12 +649,21 @@ func saveCookiesCSV(cookies []*network.Cookie, urlConfig config.URLConfig, stage
 	return nil
 }
 
-// captureFullPageScreenshot captures a full page screenshot
-func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string) error {
+// captureFullPageWithViewProof captures a special full page screenshot with ViewProof data
+func (s *Screenshoter) captureFullPageWithViewProof(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, viewportDir string) error {
+	if len(s.Config.ViewProof) == 0 {
+		return nil // Skip if ViewProof is not needed
+	}
+
+	log.Printf("Capturing special full-proof screenshot with ViewProof data")
+
 	var buf []byte
 	timestamp := time.Now().Format("20060102-150405")
-	filename := fmt.Sprintf("%s-full-%dx%d.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
-	filepath := filepath.Join(urlDir, filename)
+	filename := fmt.Sprintf("%s-full-proof-%dx%d.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
+	filepath := filepath.Join(viewportDir, filename)
+
+	// Initialize viewproofData map
+	viewproofData := make(map[string]string)
 
 	// Create base actions list
 	var tasks []chromedp.Action
@@ -526,95 +672,42 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 	tasks = append(tasks, chromedp.Navigate(urlConfig.URL))
 
 	// Log cookies before setting our custom ones
-	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before", urlDir, viewport, "full page"))
+	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before", viewportDir, viewport, "full-proof"))
 
-	// Set cookies if specified
-	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
-		// Add cookies if specified
-		if len(urlConfig.Cookies) > 0 {
-			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
-			tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-				// Get existing cookies first
-				existingCookies, err := storage.GetCookies().Do(ctx)
-				if err != nil {
-					log.Printf("ERROR: Failed to get existing cookies: %v", err)
-					return err
-				}
-
-				// Create a map of existing cookies for quick lookup
-				existingCookieMap := make(map[string]string)
-				for _, cookie := range existingCookies {
-					key := cookie.Name + cookie.Path + cookie.Domain
-					existingCookieMap[key] = cookie.Value
-				}
-
-				// Create cookie expiration (180 days)
-				expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
-
-				for _, cookie := range urlConfig.Cookies {
-					// Extract domain from URL if not specified in cookie
-					domain := cookie.Domain
-					if domain == "" {
-						// Use the URL's domain
-						domain = extractDomainFromURL(urlConfig.URL)
-					}
-
-					// Set cookie path to root if not specified
-					path := cookie.Path
-					if path == "" {
-						path = "/"
-					}
-
-					// Check if this cookie already exists with the same value
-					key := cookie.Name + path + domain
-					if value, exists := existingCookieMap[key]; exists && value == cookie.Value {
-						log.Printf("Cookie %s already exists with the same value, skipping", cookie.Name)
-						continue
-					}
-
-					err := network.SetCookie(cookie.Name, cookie.Value).
-						WithExpires(&expr).
-						WithDomain(domain).
-						WithPath(path).
-						WithHTTPOnly(cookie.HTTPOnly).
-						WithSecure(cookie.Secure).
-						Do(ctx)
-
-					if err != nil {
-						return err
-					}
-				}
-				return nil
-			}))
+	// Extract ViewProof data
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		// Extract cookie values
+		cookies, err := storage.GetCookies().Do(ctx)
+		if err != nil {
+			log.Printf("ERROR: Failed to get cookies for viewproof: %v", err)
+			return nil // Non-fatal error
 		}
 
-		// Set localStorage values if specified
-		if len(urlConfig.LocalStorage) > 0 {
-			log.Printf("Setting %d localStorage items for %s", len(urlConfig.LocalStorage), urlConfig.Name)
-			for _, storage := range urlConfig.LocalStorage {
-				jsScript := fmt.Sprintf(`
-				(function() {
-					const existingValue = localStorage.getItem("%s");
-					if (existingValue === "%s") {
-						console.log("localStorage key %s already has the same value, skipping");
-						return;
-					}
-					localStorage.setItem("%s", "%s");
-				})()`,
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Value),
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Value))
-				tasks = append(tasks, chromedp.Evaluate(jsScript, nil))
+		// Store values of cookies in viewproof list
+		for _, cookie := range cookies {
+			for _, proofKey := range s.Config.ViewProof {
+				if cookie.Name == proofKey {
+					viewproofData[fmt.Sprintf("cookie:%s", cookie.Name)] = cookie.Value
+				}
 			}
 		}
 
-		// Reload the page to ensure cookies and localStorage take effect
-		tasks = append(tasks, chromedp.Reload())
+		// Extract localStorage values
+		for _, proofKey := range s.Config.ViewProof {
+			var value string
+			err := chromedp.Evaluate(fmt.Sprintf(`localStorage.getItem("%s")`, escapeJSString(proofKey)), &value).Do(ctx)
+			if err == nil && value != "" {
+				viewproofData[fmt.Sprintf("localStorage:%s", proofKey)] = value
+			}
+		}
 
-		// Log cookies after setting our custom ones
-		tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "after", urlDir, viewport, "full page"))
+		log.Printf("Extracted %d viewproof values for full-proof screenshot", len(viewproofData))
+		return nil
+	}))
+
+	// Set cookies and localStorage if specified
+	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
+		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after", "full-proof"))
 	}
 
 	// Add remaining actions for screenshot
@@ -628,53 +721,285 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
 		chromedp.Sleep(1*time.Second), // Wait for animations to complete
-
-		// Add additional delay to ensure all elements are loaded
-		chromedp.Sleep(2*time.Second),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			// Get page metrics
-			var metrics map[string]interface{}
-			if err := chromedp.Evaluate(`({
-				width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
-				height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
-			})`, &metrics).Do(ctx); err != nil {
-				return err
-			}
-
-			// Set viewport - keep configured width but use full page height
-			// This ensures the page renders at the requested width while capturing the full height
-			width := int64(viewport.Width) // Use the configured viewport width
-
-			// Limit height to a maximum value to prevent "Unable to capture screenshot" errors
-			// Chrome has issues with extremely tall screenshots
-			height := int64(metrics["height"].(float64))
-			maxHeight := int64(16384) // Chrome has a limit around 16384 pixels
-			if height > maxHeight {
-				log.Printf("Warning: Page height (%d) exceeds maximum allowed height (%d). Limiting height.",
-					height, maxHeight)
-				height = maxHeight
-			}
-
-			if err := emulation.SetDeviceMetricsOverride(width, height, 1, false).Do(ctx); err != nil {
-				return err
-			}
-
-			// Capture full screenshot with error handling
-			err := chromedp.CaptureScreenshot(&buf).Do(ctx)
-			if err != nil {
-				// If we get an error, try with a smaller height
-				if height > 8192 {
-					log.Printf("Screenshot capture failed, trying with reduced height...")
-					if err := emulation.SetDeviceMetricsOverride(width, 8192, 1, false).Do(ctx); err != nil {
-						return err
-					}
-					return chromedp.CaptureScreenshot(&buf).Do(ctx)
-				}
-				return err
-			}
-			return nil
-		}),
 	)
+
+	// Add ViewProof block with direct DOM manipulation
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		if len(viewproofData) > 0 {
+			// Create a simple script that adds a div without interpolation issues
+			script := `
+			(function() {
+				// Remove any existing viewproof elements
+				var existing = document.getElementById('viewproof-proof-block');
+				if (existing) {
+					existing.remove();
+				}
+				
+				// Create the main container
+				var container = document.createElement('div');
+				container.id = 'viewproof-proof-block';
+				
+				// Set styles directly
+				container.style.position = 'fixed';
+				container.style.top = '0';
+				container.style.left = '0';
+				container.style.width = '100%';
+				container.style.backgroundColor = 'blue';
+				container.style.color = 'white';
+				container.style.padding = '20px';
+				container.style.zIndex = '2147483647';
+				container.style.fontSize = '24px';
+				container.style.display = 'block';
+				container.style.visibility = 'visible';
+				container.style.opacity = '1';
+				
+				// Create title
+				var title = document.createElement('h2');
+				title.innerText = 'VIEWPROOF DATA';
+				title.style.fontSize = '30px';
+				title.style.margin = '0 0 15px 0';
+				container.appendChild(title);
+				
+				// Create content
+				var pre = document.createElement('pre');
+				pre.style.backgroundColor = '#000';
+				pre.style.color = '#0f0';
+				pre.style.padding = '15px';
+				pre.style.margin = '0 auto';
+				pre.style.maxWidth = '800px';
+				pre.style.border = '3px solid white';
+				pre.style.fontSize = '18px';
+				pre.style.textAlign = 'left';
+				
+				// Set content data
+				pre.innerText = '';
+			`
+
+			// Add each key-value pair
+			for key, value := range viewproofData {
+				// Escape the values
+				escapedKey := escapeJSString(key)
+				escapedValue := escapeJSString(value)
+
+				// Append to the script
+				script += fmt.Sprintf(`pre.innerText += '%s: %s\\n';`, escapedKey, escapedValue)
+			}
+
+			// Close the script
+			script += `
+				container.appendChild(pre);
+				document.body.prepend(container);
+				return true;
+			})();`
+
+			// Execute the script
+			var result bool
+			err := chromedp.Evaluate(script, &result).Do(ctx)
+			if err != nil {
+				log.Printf("ERROR creating ViewProof block: %v", err)
+				return err
+			}
+
+			log.Printf("Added ViewProof block to proof screenshot")
+		}
+		return nil
+	}))
+
+	// Add a longer delay to ensure the block is rendered
+	tasks = append(tasks, chromedp.Sleep(2*time.Second))
+
+	// Add additional delay to ensure all elements are loaded
+	tasks = append(tasks, chromedp.Sleep(1*time.Second))
+
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		// Get page metrics
+		var metrics map[string]interface{}
+		if err := chromedp.Evaluate(`({
+			width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+			height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+		})`, &metrics).Do(ctx); err != nil {
+			return err
+		}
+
+		// Set viewport - keep configured width but use full page height
+		// This ensures the page renders at the requested width while capturing the full height
+		width := int64(viewport.Width) // Use the configured viewport width
+
+		// Limit height to a maximum value to prevent "Unable to capture screenshot" errors
+		// Chrome has issues with extremely tall screenshots
+		height := int64(metrics["height"].(float64))
+		maxHeight := int64(16384) // Chrome has a limit around 16384 pixels
+		if height > maxHeight {
+			log.Printf("Warning: Page height (%d) exceeds maximum allowed height (%d). Limiting height.",
+				height, maxHeight)
+			height = maxHeight
+		}
+
+		if err := emulation.SetDeviceMetricsOverride(width, height, 1, false).Do(ctx); err != nil {
+			return err
+		}
+
+		// Capture full screenshot with error handling
+		err := chromedp.CaptureScreenshot(&buf).Do(ctx)
+		if err != nil {
+			// If we get an error, try with a smaller height
+			if height > 8192 {
+				log.Printf("Screenshot capture failed, trying with reduced height...")
+				if err := emulation.SetDeviceMetricsOverride(width, 8192, 1, false).Do(ctx); err != nil {
+					return err
+				}
+				return chromedp.CaptureScreenshot(&buf).Do(ctx)
+			}
+			return err
+		}
+
+		return nil
+	}))
+
+	// Execute tasks
+	if err := chromedp.Run(ctx, tasks...); err != nil {
+		return err
+	}
+
+	// Save screenshot to file
+	if err := os.WriteFile(filepath, buf, 0644); err != nil {
+		return err
+	}
+
+	log.Printf("Captured full-proof screenshot for %s at viewport %dx%d: %s", urlConfig.Name, viewport.Width, viewport.Height, filepath)
+	return nil
+}
+
+// captureFullPageScreenshot captures a full page screenshot
+func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, viewportDir string) error {
+	var buf []byte
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-full-%dx%d.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
+	filepath := filepath.Join(viewportDir, filename)
+
+	// Create base actions list
+	var tasks []chromedp.Action
+
+	// First navigate to the URL
+	tasks = append(tasks, chromedp.Navigate(urlConfig.URL))
+
+	// Log cookies before setting our custom ones
+	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before", viewportDir, viewport, "full page"))
+
+	// Extract viewproof data only for saving to companion file, not displaying
+	var viewproofData map[string]string
+	if len(s.Config.ViewProof) > 0 {
+		// Initialize the viewproofData map
+		viewproofData = make(map[string]string)
+
+		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+			// Extract cookie values
+			cookies, err := storage.GetCookies().Do(ctx)
+			if err != nil {
+				log.Printf("ERROR: Failed to get cookies for viewproof: %v", err)
+				return nil // Non-fatal error
+			}
+
+			// Store values of cookies in viewproof list
+			for _, cookie := range cookies {
+				for _, proofKey := range s.Config.ViewProof {
+					if cookie.Name == proofKey {
+						viewproofData[fmt.Sprintf("cookie:%s", cookie.Name)] = cookie.Value
+					}
+				}
+			}
+
+			// Extract localStorage values
+			for _, proofKey := range s.Config.ViewProof {
+				var value string
+				err := chromedp.Evaluate(fmt.Sprintf(`localStorage.getItem("%s")`, escapeJSString(proofKey)), &value).Do(ctx)
+				if err == nil && value != "" {
+					viewproofData[fmt.Sprintf("localStorage:%s", proofKey)] = value
+				}
+			}
+
+			log.Printf("Extracted %d viewproof values", len(viewproofData))
+			return nil
+		}))
+	}
+
+	// Set cookies and localStorage if specified
+	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
+		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after", "full page"))
+	}
+
+	// Add remaining actions for screenshot
+	tasks = append(tasks,
+		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
+
+		// Scroll to bottom to load lazy content
+		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
+		chromedp.Sleep(1*time.Second), // Wait for content to load
+
+		// Scroll back to top
+		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
+		chromedp.Sleep(1*time.Second), // Wait for animations to complete
+	)
+
+	// Add additional delay to ensure all elements are loaded
+	tasks = append(tasks, chromedp.Sleep(2*time.Second))
+
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		// Get page metrics
+		var metrics map[string]interface{}
+		if err := chromedp.Evaluate(`({
+			width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+			height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+		})`, &metrics).Do(ctx); err != nil {
+			return err
+		}
+
+		// Set viewport - keep configured width but use full page height
+		// This ensures the page renders at the requested width while capturing the full height
+		width := int64(viewport.Width) // Use the configured viewport width
+
+		// Limit height to a maximum value to prevent "Unable to capture screenshot" errors
+		// Chrome has issues with extremely tall screenshots
+		height := int64(metrics["height"].(float64))
+		maxHeight := int64(16384) // Chrome has a limit around 16384 pixels
+		if height > maxHeight {
+			log.Printf("Warning: Page height (%d) exceeds maximum allowed height (%d). Limiting height.",
+				height, maxHeight)
+			height = maxHeight
+		}
+
+		if err := emulation.SetDeviceMetricsOverride(width, height, 1, false).Do(ctx); err != nil {
+			return err
+		}
+
+		// Capture full screenshot with error handling
+		err := chromedp.CaptureScreenshot(&buf).Do(ctx)
+		if err != nil {
+			// If we get an error, try with a smaller height
+			if height > 8192 {
+				log.Printf("Screenshot capture failed, trying with reduced height...")
+				if err := emulation.SetDeviceMetricsOverride(width, 8192, 1, false).Do(ctx); err != nil {
+					return err
+				}
+				return chromedp.CaptureScreenshot(&buf).Do(ctx)
+			}
+			return err
+		}
+
+		// If we have ViewProof data, create a companion text file
+		if len(s.Config.ViewProof) > 0 && len(viewproofData) > 0 {
+			// Create text overlay directly on the image
+			overlayText := fmt.Sprintf("VIEWPROOF DATA - %s", timestamp)
+			for key, value := range viewproofData {
+				overlayText += fmt.Sprintf("\n%s: %s", key, value)
+			}
+
+			log.Printf("Adding ViewProof data as direct text overlay on image")
+			log.Printf("ViewProof data: %s", overlayText)
+		}
+
+		return nil
+	}))
 
 	// Execute tasks
 	if err := chromedp.Run(ctx, tasks...); err != nil {
@@ -691,7 +1016,7 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 }
 
 // captureViewportScreenshots captures screenshots divided by viewport
-func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, urlDir string) error {
+func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig config.URLConfig, viewport config.Viewport, viewportDir string, captureViewports bool) error {
 	var pageHeight float64
 	timestamp := time.Now().Format("20060102-150405")
 
@@ -702,95 +1027,11 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	tasks = append(tasks, chromedp.Navigate(urlConfig.URL))
 
 	// Log cookies before setting our custom ones
-	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before-viewport", urlDir, viewport, "viewport"))
+	tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "before-viewport", viewportDir, viewport, "viewport"))
 
-	// Set cookies if specified
+	// Set cookies and localStorage if specified
 	if len(urlConfig.Cookies) > 0 || len(urlConfig.LocalStorage) > 0 {
-		// Add cookies if specified
-		if len(urlConfig.Cookies) > 0 {
-			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
-			tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-				// Get existing cookies first
-				existingCookies, err := storage.GetCookies().Do(ctx)
-				if err != nil {
-					log.Printf("ERROR: Failed to get existing cookies: %v", err)
-					return err
-				}
-
-				// Create a map of existing cookies for quick lookup
-				existingCookieMap := make(map[string]string)
-				for _, cookie := range existingCookies {
-					key := cookie.Name + cookie.Path + cookie.Domain
-					existingCookieMap[key] = cookie.Value
-				}
-
-				// Create cookie expiration (180 days)
-				expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
-
-				for _, cookie := range urlConfig.Cookies {
-					// Extract domain from URL if not specified in cookie
-					domain := cookie.Domain
-					if domain == "" {
-						// Use the URL's domain
-						domain = extractDomainFromURL(urlConfig.URL)
-					}
-
-					// Set cookie path to root if not specified
-					path := cookie.Path
-					if path == "" {
-						path = "/"
-					}
-
-					// Check if this cookie already exists with the same value
-					key := cookie.Name + path + domain
-					if value, exists := existingCookieMap[key]; exists && value == cookie.Value {
-						log.Printf("Cookie %s already exists with the same value, skipping", cookie.Name)
-						continue
-					}
-
-					err := network.SetCookie(cookie.Name, cookie.Value).
-						WithExpires(&expr).
-						WithDomain(domain).
-						WithPath(path).
-						WithHTTPOnly(cookie.HTTPOnly).
-						WithSecure(cookie.Secure).
-						Do(ctx)
-
-					if err != nil {
-						return err
-					}
-				}
-				return nil
-			}))
-		}
-
-		// Set localStorage values if specified
-		if len(urlConfig.LocalStorage) > 0 {
-			log.Printf("Setting %d localStorage items for %s", len(urlConfig.LocalStorage), urlConfig.Name)
-			for _, storage := range urlConfig.LocalStorage {
-				jsScript := fmt.Sprintf(`
-				(function() {
-					const existingValue = localStorage.getItem("%s");
-					if (existingValue === "%s") {
-						console.log("localStorage key %s already has the same value, skipping");
-						return;
-					}
-					localStorage.setItem("%s", "%s");
-				})()`,
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Value),
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Key),
-					escapeJSString(storage.Value))
-				tasks = append(tasks, chromedp.Evaluate(jsScript, nil))
-			}
-		}
-
-		// Reload the page to ensure cookies and localStorage take effect
-		tasks = append(tasks, chromedp.Reload())
-
-		// Log cookies after setting our custom ones
-		tasks = append(tasks, SaveCookiesToFile(ctx, urlConfig, "after-viewport", urlDir, viewport, "viewport"))
+		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after-viewport", "viewport"))
 	}
 
 	// Add remaining actions for screenshot
@@ -804,9 +1045,9 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
 		chromedp.Sleep(1*time.Second), // Wait for animations to complete
-
-		chromedp.Evaluate(`Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)`, &pageHeight),
 	)
+
+	tasks = append(tasks, chromedp.Evaluate(`Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)`, &pageHeight))
 
 	// Execute tasks to get page height
 	if err := chromedp.Run(ctx, chromedp.Tasks(tasks)); err != nil {
@@ -836,7 +1077,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 	if pageHeight <= viewportHeight || viewportCount == 1 {
 		var buf []byte
 		filename := fmt.Sprintf("%s-viewport-%dx%d-1.%s", timestamp, viewport.Width, viewport.Height, s.Config.FileFormat)
-		filepath := filepath.Join(urlDir, filename)
+		filepath := filepath.Join(viewportDir, filename)
 
 		if err := chromedp.Run(ctx,
 			// Scroll to top
@@ -849,6 +1090,9 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 					Type:  emulation.OrientationTypePortraitPrimary,
 					Angle: 0,
 				}),
+
+			// Add a longer delay before screenshot to ensure everything is rendered
+			chromedp.Sleep(1500*time.Millisecond),
 
 			// Capture screenshot
 			chromedp.CaptureScreenshot(&buf),
@@ -880,7 +1124,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		}
 
 		filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, viewport.Width, viewport.Height, i+1, s.Config.FileFormat)
-		filepath := filepath.Join(urlDir, filename)
+		filepath := filepath.Join(viewportDir, filename)
 
 		// Scroll to position and capture screenshot of only the viewport
 		if err := chromedp.Run(ctx,
@@ -895,6 +1139,9 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 					Angle: 0,
 				}),
 
+			// Add a longer delay before screenshot to ensure everything is rendered
+			chromedp.Sleep(1500*time.Millisecond),
+
 			// Capture only the viewport screenshot
 			chromedp.CaptureScreenshot(&buf),
 		); err != nil {
@@ -906,10 +1153,278 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 			return err
 		}
 
-		log.Printf("Captured viewport screenshot %d/%d for %s: %s", i+1, viewportCount, urlConfig.Name, filepath)
+		log.Printf("Captured viewport screenshot for %s: %s", urlConfig.Name, filepath)
 	}
 
 	return nil
+}
+
+// extractDomainFromURL extracts a domain name from a URL for cookie setting
+func extractDomainFromURL(url string) string {
+	// Remove protocol if present
+	if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	} else if strings.HasPrefix(url, "https://") {
+		url = url[8:]
+	}
+
+	// Remove www. prefix if present
+	if strings.HasPrefix(url, "www.") {
+		url = url[4:]
+	}
+
+	// Get domain part (stop at first slash)
+	if idx := strings.Index(url, "/"); idx > 0 {
+		url = url[:idx]
+	}
+
+	// Remove port if present
+	if idx := strings.Index(url, ":"); idx > 0 {
+		url = url[:idx]
+	}
+
+	return url
+}
+
+// formatViewproofData formats viewproof data for display in the ViewProof block
+func formatViewproofData(data map[string]string) string {
+	var formattedData strings.Builder
+	for key, value := range data {
+		formattedData.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+	}
+	return formattedData.String()
+}
+
+// escapeJSString escapes a string for embedding in a JavaScript string
+func escapeJSString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "'", "\\'")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return s
+}
+
+// createViewProof creates JavaScript code to inject a ViewProof overlay/block with the provided data
+// Parameters:
+//   - viewproofData: The data to display in the block
+//   - forceful: Whether to use the forceful overlay (true) or standard block (false)
+//   - separateCSS: Whether to return CSS separately (for standard block) or include it in the JS (for forceful overlay)
+func (s *Screenshoter) createViewProof(viewproofData map[string]string, forceful bool, separateCSS bool) (string, string) {
+	// Format the viewproof data for display
+	formattedData := formatViewproofData(viewproofData)
+
+	// Element ID based on type
+	elementID := "viewproof-block"
+	if forceful {
+		elementID = "super-viewproof-overlay"
+	}
+
+	// Create script based on type
+	var script string
+	if forceful {
+		// Forceful overlay always creates a new element
+		script = `
+		(function() {
+			try {
+				// Create element and set properties directly
+				var overlay = document.createElement('div');
+				overlay.id = '` + elementID + `';
+				
+				// Apply styles in a cleaner, organized way
+				const overlayStyles = {
+					// Positioning
+					position: 'fixed',
+					top: 0,
+					left: 0, 
+					opacity: 0.9,
+					zIndex: '9999',
+					// Sizing
+					width: '100%',
+					boxSizing: 'border-box',
+					backgroundColor: 'blue',
+					color: 'white',
+					padding: '20px',
+					border: '1px solid #FFFF00',
+					boxShadow: '0 0 50px rgba(0,0,0,0.8)',
+					
+					// Typography
+					fontSize: '30px',
+					fontFamily: 'Arial, sans-serif',
+					fontWeight: 'bold',
+					lineHeight: '1.5',
+					textAlign: 'center'
+				};
+				
+				// Apply all styles at once
+				Object.assign(overlay.style, overlayStyles);
+				
+				// Create title with clean styling
+				var title = document.createElement('h2');
+				title.innerText = 'VIEWPROOF DATA';
+				
+				const titleStyles = {
+					margin: '0 0 20px 0',
+					fontSize: '40px',
+					textDecoration: 'underline'
+				};
+				Object.assign(title.style, titleStyles);
+				
+				overlay.appendChild(title);
+				
+				// Create content with clean styling
+				var pre = document.createElement('pre');
+				
+				const preStyles = {
+					// Appearance
+					backgroundColor: 'black',
+					color: '#00FF00',
+					border: '5px solid white',
+					boxSizing: 'border-box',
+					// Spacing
+					padding: '15px',
+					margin: '10px auto',
+					
+					// Typography
+					fontSize: '20px',
+					textAlign: 'left',
+					
+					// Layout
+					maxWidth: '800px',
+					overflow: 'visible',
+					wordWrap: 'break-word'
+				};
+				Object.assign(pre.style, preStyles);
+				
+				pre.innerText = "` + escapeJSString(formattedData) + `";
+				overlay.appendChild(pre);
+				
+				// Add to document
+				document.body.prepend(overlay);
+				
+				console.log('ViewProof overlay created successfully');
+				return true;
+			} catch(e) {
+				console.error('Error creating ViewProof overlay:', e);
+				return false;
+			}
+		})();
+		`
+	} else {
+		// Standard block that checks if one already exists
+		script = `
+		(function() {
+			// Try to find the viewproof block
+			let block = document.getElementById('` + elementID + `');
+			
+			// If block doesn't exist, create it
+			if (!block) {
+				// Add global style for the block
+				let style = document.createElement('style');
+				style.textContent = '%s';
+				document.head.appendChild(style);
+				
+				// Create block
+				block = document.createElement('div');
+				block.id = '` + elementID + `';
+				block.innerHTML = '<div class="viewproof-title">VIEWPROOF DATA</div><pre class="viewproof-content">` + escapeJSString(formattedData) + `</pre>';
+				document.body.appendChild(block);
+				console.log('ViewProof block created and made visible');
+				return true;
+			}
+			
+			// If block exists, ensure it's visible and on top by adding 'viewproof-important' class
+			block.className = 'viewproof-important';
+			
+			// Move to body end to ensure proper stacking
+			document.body.appendChild(block);
+			
+			console.log('ViewProof block visibility enforced');
+			return true;
+		})();
+		`
+	}
+
+	// CSS styles for viewproof block
+	css := `/* ViewProof Block Styles */
+	#` + elementID + ` {
+		/* Positioning */
+		position: fixed !important;
+		top: 0 !important;
+		left: 0 !important;
+		z-index: 2147483647 !important;
+		
+		/* Layout */
+		width: 100% !important;
+		display: block !important;
+		visibility: visible !important;
+		opacity: 1 !important;
+		
+		/* Appearance */
+		background-color:rgb(0, 55, 255) !important;
+		color: white !important;
+		padding: 20px !important;
+		
+		/* Typography */
+		font-size: 24px !important;
+	}
+	
+	.viewproof-important {
+		position: fixed !important;
+		top: 0 !important;
+		left: 0 !important;
+		width: 100% !important;
+		background-color:rgb(255, 0, 251) !important;
+		color: white !important;
+		padding: 20px !important;
+		font-size: 24px !important;
+		z-index: 2147483647 !important;
+		display: block !important;
+		visibility: visible !important;
+		opacity: 1 !important;
+	}
+	
+	#` + elementID + ` pre {
+		/* Appearance */
+		background-color: black !important;
+		color: #00FF00 !important;
+		border: 5px solid white !important;
+		
+		/* Layout */
+		max-width: 800px !important;
+		overflow: visible !important;
+		word-wrap: break-word !important;
+		
+		/* Spacing */
+		padding: 15px !important;
+		margin: 10px auto !important;
+		
+		/* Typography */
+		font-size: 20px !important;
+		text-align: left !important;
+	}
+	
+	.viewproof-title {
+		font-size: 22px !important;
+		font-weight: bold !important;
+		margin-bottom: 10px !important;
+	}
+	
+	.viewproof-content {
+		text-align: left !important;
+		background: black !important;
+		padding: 10px !important;
+		margin: 0 !important;
+	}`
+
+	// If not separating CSS, script is returned as is
+	if !separateCSS {
+		return script, ""
+	}
+
+	// Otherwise return both script and CSS separately
+	return script, css
 }
 
 // CaptureURLs captures screenshots for all URLs in configuration
@@ -953,48 +1468,4 @@ func (s *Screenshoter) CaptureURLs(ctx context.Context) error {
 	default:
 		return nil
 	}
-}
-
-// extractDomainFromURL extracts a domain name from a URL for cookie setting
-func extractDomainFromURL(url string) string {
-	// Remove protocol if present
-	if strings.HasPrefix(url, "http://") {
-		url = url[7:]
-	} else if strings.HasPrefix(url, "https://") {
-		url = url[8:]
-	}
-
-	// Remove www. prefix if present
-	if strings.HasPrefix(url, "www.") {
-		url = url[4:]
-	}
-
-	// Get domain part (stop at first slash)
-	if idx := strings.Index(url, "/"); idx > 0 {
-		url = url[:idx]
-	}
-
-	// Remove port if present
-	if idx := strings.Index(url, ":"); idx > 0 {
-		url = url[:idx]
-	}
-
-	return url
-}
-
-// escapeJSString escapes a string for use in JavaScript
-func escapeJSString(s string) string {
-	// Replace backslash with double backslash
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	// Replace double quote with escaped double quote
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	// Replace single quote with escaped single quote
-	s = strings.ReplaceAll(s, "'", "\\'")
-	// Replace newline with escaped newline
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	// Replace carriage return with escaped carriage return
-	s = strings.ReplaceAll(s, "\r", "\\r")
-	// Replace tab with escaped tab
-	s = strings.ReplaceAll(s, "\t", "\\t")
-	return s
 }

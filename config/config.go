@@ -56,6 +56,7 @@ type Config struct {
 	DefaultCookies   []Cookie        `json:"defaultCookies,omitempty"`
 	DefaultStorage   []LocalStorage  `json:"defaultStorage,omitempty"`
 	CookieProfiles   []CookieProfile `json:"cookieProfiles,omitempty"` // Named cookie profiles
+	ViewProof        []string        `json:"viewproof,omitempty"`      // List of cookie/localStorage keys to extract and display
 	OutputDir        string          `json:"outputDir"`
 	FileFormat       string          `json:"fileFormat"`
 	Quality          int             `json:"quality"`
