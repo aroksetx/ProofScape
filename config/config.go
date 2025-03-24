@@ -56,6 +56,7 @@ type Config struct {
 	DefaultCookies   []Cookie        `json:"defaultCookies,omitempty"`
 	DefaultStorage   []LocalStorage  `json:"defaultStorage,omitempty"`
 	CookieProfiles   []CookieProfile `json:"cookieProfiles,omitempty"` // Named cookie profiles
+	ViewProof        []string        `json:"viewproof,omitempty"`      // List of cookie/localStorage keys to extract and display
 	OutputDir        string          `json:"outputDir"`
 	FileFormat       string          `json:"fileFormat"`
 	Quality          int             `json:"quality"`
@@ -208,6 +209,20 @@ func validateConfig(config *Config) error {
 			if len(config.URLs[i].Cookies) == 0 && len(config.DefaultCookies) > 0 {
 				config.URLs[i].Cookies = make([]Cookie, len(config.DefaultCookies))
 				copy(config.URLs[i].Cookies, config.DefaultCookies)
+			} else if len(config.DefaultCookies) > 0 {
+				// Merge defaultCookies with URL-specific cookies
+				// First, create a map of existing cookie names to avoid duplicates
+				existingCookies := make(map[string]bool)
+				for _, cookie := range config.URLs[i].Cookies {
+					existingCookies[cookie.Name] = true
+				}
+
+				// Add default cookies that don't already exist
+				for _, defaultCookie := range config.DefaultCookies {
+					if _, exists := existingCookies[defaultCookie.Name]; !exists {
+						config.URLs[i].Cookies = append(config.URLs[i].Cookies, defaultCookie)
+					}
+				}
 			}
 
 			// Apply default localStorage if no profile specified and the URL doesn't have its own
