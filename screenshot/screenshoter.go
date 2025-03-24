@@ -22,6 +22,9 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+// Global mutex to synchronize Docker container operations
+var dockerMutex sync.Mutex
+
 // findChromeExecutable attempts to locate the Chrome executable on the system
 func findChromeExecutable() (string, error) {
 	// Check for environment variable first
@@ -85,36 +88,53 @@ func findChromeExecutable() (string, error) {
 
 // startDockerChrome starts a Chrome instance in Docker if not already running
 func startDockerChrome() (string, error) {
+	// Acquire mutex to prevent parallel container creation
+	dockerMutex.Lock()
+	defer dockerMutex.Unlock()
+
 	// Check if docker is installed
 	if _, err := exec.LookPath("docker"); err != nil {
 		return "", fmt.Errorf("docker not installed: %w", err)
 	}
 
-	// Check if chrome container is already running
-	cmd := exec.Command("docker", "ps", "-q", "-f", "name=chrome", "-f", "status=running")
-	output, err := cmd.Output()
+	// Check if chrome container exists (running or not)
+	existsCmd := exec.Command("docker", "ps", "-a", "-q", "-f", "name=chrome")
+	existsOutput, err := existsCmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to check for running chrome container: %w", err)
+		return "", fmt.Errorf("failed to check for existing chrome container: %w", err)
 	}
 
-	// If container is already running, return its address
-	if len(output) > 0 {
-		log.Printf("Using existing Chrome container")
+	// If container exists in any state
+	if len(existsOutput) > 0 {
+		// Check if it's running and responding
+		runningCmd := exec.Command("docker", "ps", "-q", "-f", "name=chrome", "-f", "status=running")
+		runningOutput, err := runningCmd.Output()
 
-		// Verify the existing container responds before continuing
-		if err := checkChromeResponseFromContainer(5); err != nil {
-			// Container exists but doesn't respond, stop and remove it
-			log.Printf("Existing Chrome container not responding, removing it: %v", err)
-			stopCmd := exec.Command("docker", "rm", "-f", "chrome")
-			stopCmd.Run() // Ignore errors, we'll try to recreate
+		if err == nil && len(runningOutput) > 0 {
+			// Container is running, check if it responds
+			log.Printf("Found existing Chrome container, checking if it's responsive")
+			if err := checkChromeResponseFromContainer(5); err == nil {
+				log.Printf("Using existing Chrome container")
+				return "http://localhost:9222", nil
+			} else {
+				log.Printf("Existing Chrome container not responding: %v", err)
+			}
 		} else {
-			return "http://localhost:9222", nil
+			log.Printf("Chrome container exists but is not running")
+		}
+
+		// Container exists but is not running or not responding - remove it
+		log.Printf("Removing existing Chrome container")
+		stopCmd := exec.Command("docker", "rm", "-f", "chrome")
+		if stopOut, stopErr := stopCmd.CombinedOutput(); stopErr != nil {
+			log.Printf("Warning: Failed to remove existing Chrome container: %v, output: %s", stopErr, string(stopOut))
+			// Continue anyway, the next docker run command will fail if this is a real problem
 		}
 	}
 
 	// Start a new chrome container with improved configuration
-	log.Printf("Starting Chrome container...")
-	cmd = exec.Command("docker", "run", "-d", "--rm", "--name", "chrome",
+	log.Printf("Starting a new Chrome container...")
+	cmd := exec.Command("docker", "run", "-d", "--rm", "--name", "chrome",
 		"-p", "9222:9222", // Using standard port 9222 for chromedp/headless-shell
 		"--cap-add=SYS_ADMIN",              // Add capabilities needed for Chrome
 		"--shm-size=2g",                    // Increase shared memory size to 2GB
@@ -133,21 +153,29 @@ func startDockerChrome() (string, error) {
 	// Wait for container to be ready with increased timeout
 	log.Printf("Waiting for Chrome container to be ready (this may take up to 20 seconds)...")
 
-	// Check if Chrome responds within timeout
-	if err := checkChromeResponseFromContainer(20); err != nil {
-		// Get container logs for diagnostics
-		logsCmd := exec.Command("docker", "logs", "chrome")
-		logs, _ := logsCmd.CombinedOutput()
+	// Check if Chrome responds within timeout with retries
+	for retryAttempt := 0; retryAttempt < 3; retryAttempt++ {
+		if err := checkChromeResponseFromContainer(20); err != nil {
+			if retryAttempt == 2 {
+				// Get container logs for diagnostics
+				logsCmd := exec.Command("docker", "logs", "chrome")
+				logs, _ := logsCmd.CombinedOutput()
 
-		// Stop the container since it's not working
-		stopCmd := exec.Command("docker", "rm", "-f", "chrome")
-		stopCmd.Run() // Ignore errors
+				// Stop the container since it's not working
+				stopCmd := exec.Command("docker", "rm", "-f", "chrome")
+				stopCmd.Run() // Ignore errors
 
-		return "", fmt.Errorf("chrome container started but not responding: %v\nContainer logs: %s",
-			err, string(logs))
+				return "", fmt.Errorf("chrome container started but not responding after retries: %v\nContainer logs: %s",
+					err, string(logs))
+			}
+			log.Printf("Chrome container not responding yet, retrying... (attempt %d/3)", retryAttempt+1)
+			time.Sleep(2 * time.Second)
+		} else {
+			log.Printf("Chrome container is ready")
+			return "http://localhost:9222", nil
+		}
 	}
 
-	log.Printf("Chrome container is ready")
 	return "http://localhost:9222", nil
 }
 

@@ -2,7 +2,7 @@
   "urls": [
     {
       "name": "example-site",
-      "url": "https://example.com/product",
+      "url": "https://example.com",
       "viewports": [
         {
           "width": 1920,
@@ -36,7 +36,10 @@
     }
   ],
   "urlList": [
-    "https://example.com/product"
+    "https://example.com/product",
+    "https://example.com/product2",
+    "https://example.com/product3",
+    "https://example.com/product4"
   ],
   "defaultViewports": [
     {
