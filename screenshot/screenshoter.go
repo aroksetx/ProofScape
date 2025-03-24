@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"screenshot-tool/config"
@@ -208,6 +209,9 @@ func (s *Screenshoter) setCookiesAndLocalStorage(ctx context.Context, urlConfig 
 			log.Printf("Setting cookies from DefaultCookies configuration")
 		}
 
+		// Flag to track if any cookie or localStorage values were changed
+		needsRefresh := false
+
 		// Add cookies if specified
 		if len(urlConfig.Cookies) > 0 {
 			log.Printf("Setting %d cookies for %s", len(urlConfig.Cookies), urlConfig.Name)
@@ -261,6 +265,8 @@ func (s *Screenshoter) setCookiesAndLocalStorage(ctx context.Context, urlConfig 
 				if err != nil {
 					return err
 				}
+
+				needsRefresh = true
 			}
 		}
 
@@ -273,41 +279,51 @@ func (s *Screenshoter) setCookiesAndLocalStorage(ctx context.Context, urlConfig 
 					const existingValue = localStorage.getItem("%s");
 					if (existingValue === "%s") {
 						console.log("localStorage key %s already has the same value, skipping");
-						return;
+						return false;
 					}
 					localStorage.setItem("%s", "%s");
+					return true;
 				})()`,
 					escapeJSString(storage.Key),
 					escapeJSString(storage.Value),
 					escapeJSString(storage.Key),
 					escapeJSString(storage.Key),
 					escapeJSString(storage.Value))
-				if err := chromedp.Evaluate(jsScript, nil).Do(ctx); err != nil {
+
+				var changed bool
+				if err := chromedp.Evaluate(jsScript, &changed).Do(ctx); err != nil {
 					return err
+				}
+
+				if changed {
+					needsRefresh = true
 				}
 			}
 		}
 
-		// Always refresh the page after setting cookies/localStorage to ensure they are applied
-		log.Printf("Refreshing page to ensure cookies and localStorage are applied")
-		if err := chromedp.Reload().Do(ctx); err != nil {
-			return err
-		}
-
-		// Extra refresh for DefaultCookies to ensure they're fully applied
-		if defaultCookiesApplied {
-			log.Printf("Adding extra refresh to ensure DefaultCookies are fully applied")
-			if err := chromedp.Sleep(500 * time.Millisecond).Do(ctx); err != nil {
-				return err
-			}
+		// Only refresh if needed
+		if needsRefresh || defaultCookiesApplied {
+			log.Printf("Refreshing page to ensure cookies and localStorage are applied")
 			if err := chromedp.Reload().Do(ctx); err != nil {
 				return err
 			}
-		}
 
-		// Wait for page to load after refresh
-		if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
-			return err
+			// Extra refresh for DefaultCookies to ensure they're fully applied
+			if defaultCookiesApplied {
+				log.Printf("Adding extra refresh to ensure DefaultCookies are fully applied")
+				// Reduced sleep time
+				if err := chromedp.Sleep(300 * time.Millisecond).Do(ctx); err != nil {
+					return err
+				}
+				if err := chromedp.Reload().Do(ctx); err != nil {
+					return err
+				}
+			}
+
+			// Reduced wait time for page to load after refresh
+			if err := chromedp.Sleep(500 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
 		}
 
 		// Log cookies after setting our custom ones
@@ -320,8 +336,8 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 	// Create context with timeout - increase for complex pages
 	// Calculate a longer timeout based on the number of viewports and complexity
 	viewportsCount := len(urlConfig.Viewports)
-	// Increase timeout calculation: base time (120s) + time per viewport (90s) * number of viewports
-	timeoutDuration := 120*time.Second + time.Duration(90*viewportsCount)*time.Second
+	// Increase timeout calculation: base time (120s) + time per viewport (60s) * number of viewports
+	timeoutDuration := 120*time.Second + time.Duration(60*viewportsCount)*time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
@@ -343,25 +359,55 @@ func (s *Screenshoter) CaptureURL(ctx context.Context, urlConfig config.URLConfi
 	// Check if ViewProof is needed
 	viewproofNeeded := len(s.Config.ViewProof) > 0
 
+	// Use a WaitGroup to wait for all viewports to be processed
+	var wg sync.WaitGroup
+	// Create error channel for goroutines
+	errChan := make(chan error, len(urlConfig.Viewports))
+
+	// Create semaphore to limit parallel viewport processing to prevent excessive resource usage
+	// This is a separate semaphore from the URL concurrency one
+	viewportSem := make(chan struct{}, 3) // Process up to 3 viewports in parallel
+
 	// Process each viewport for this URL
 	for i, viewport := range urlConfig.Viewports {
-		// Create subdirectory for this viewport
-		viewportDirName := fmt.Sprintf("%dx%d", viewport.Width, viewport.Height)
-		viewportDir := filepath.Join(urlDir, viewportDirName)
-		if err := os.MkdirAll(viewportDir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory for viewport %s: %w", viewportDirName, err)
-		}
+		wg.Add(1)
+		// Capture viewport in a goroutine
+		go func(i int, viewport config.Viewport) {
+			defer wg.Done()
 
-		log.Printf("Capturing screenshots for %s at viewport %dx%d", urlConfig.Name, viewport.Width, viewport.Height)
+			// Acquire semaphore
+			viewportSem <- struct{}{}
+			defer func() { <-viewportSem }()
 
-		// Standard capture for all viewports (with the special ViewProof for the first viewport)
-		if err := s.captureWithViewport(ctx, urlConfig, viewport, viewportDir, true, viewproofNeeded && i == 0); err != nil {
-			return fmt.Errorf("failed to capture screenshots for %s at viewport %dx%d: %w",
-				urlConfig.Name, viewport.Width, viewport.Height, err)
-		}
+			// Create subdirectory for this viewport
+			viewportDirName := fmt.Sprintf("%dx%d", viewport.Width, viewport.Height)
+			viewportDir := filepath.Join(urlDir, viewportDirName)
+			if err := os.MkdirAll(viewportDir, 0755); err != nil {
+				errChan <- fmt.Errorf("failed to create directory for viewport %s: %w", viewportDirName, err)
+				return
+			}
+
+			log.Printf("Capturing screenshots for %s at viewport %dx%d", urlConfig.Name, viewport.Width, viewport.Height)
+
+			// Standard capture for all viewports (with ViewProof for all viewports when needed)
+			if err := s.captureWithViewport(ctx, urlConfig, viewport, viewportDir, true, viewproofNeeded); err != nil {
+				errChan <- fmt.Errorf("failed to capture screenshots for %s at viewport %dx%d: %w",
+					urlConfig.Name, viewport.Width, viewport.Height, err)
+				return
+			}
+		}(i, viewport)
 	}
 
-	return nil
+	// Wait for all viewports to be processed
+	wg.Wait()
+
+	// Check if there were any errors
+	select {
+	case err := <-errChan:
+		return err
+	default:
+		return nil
+	}
 }
 
 // captureWithViewport captures screenshots for a specific viewport size
@@ -710,17 +756,17 @@ func (s *Screenshoter) captureFullPageWithViewProof(ctx context.Context, urlConf
 		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after", "full-proof"))
 	}
 
-	// Add remaining actions for screenshot
+	// Add remaining actions for screenshot - reduce sleep times
 	tasks = append(tasks,
 		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
 
 		// Scroll to bottom to load lazy content
 		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for content to load
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for animations to complete
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 	)
 
 	// Add ViewProof block with direct DOM manipulation
@@ -755,9 +801,10 @@ func (s *Screenshoter) captureFullPageWithViewProof(ctx context.Context, urlConf
 				
 				// Create title
 				var title = document.createElement('h2');
-				title.innerText = 'VIEWPROOF DATA';
+				title.innerText = '🤖 VIEWPROOF DATA';
 				title.style.fontSize = '30px';
 				title.style.margin = '0 0 15px 0';
+				title.classList.add('viewproof-title');
 				container.appendChild(title);
 				
 				// Create content
@@ -805,11 +852,11 @@ func (s *Screenshoter) captureFullPageWithViewProof(ctx context.Context, urlConf
 		return nil
 	}))
 
-	// Add a longer delay to ensure the block is rendered
-	tasks = append(tasks, chromedp.Sleep(2*time.Second))
+	// Reduced delay to ensure the block is rendered
+	tasks = append(tasks, chromedp.Sleep(1*time.Second)) // Reduced from 2s to 1s
 
-	// Add additional delay to ensure all elements are loaded
-	tasks = append(tasks, chromedp.Sleep(1*time.Second))
+	// Reduced additional delay to ensure all elements are loaded
+	tasks = append(tasks, chromedp.Sleep(500*time.Millisecond)) // Reduced from 1s to 500ms
 
 	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 		// Get page metrics
@@ -928,21 +975,21 @@ func (s *Screenshoter) captureFullPageScreenshot(ctx context.Context, urlConfig 
 		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after", "full page"))
 	}
 
-	// Add remaining actions for screenshot
+	// Add remaining actions for screenshot - reduce sleep times
 	tasks = append(tasks,
 		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
 
 		// Scroll to bottom to load lazy content
 		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for content to load
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for animations to complete
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 	)
 
-	// Add additional delay to ensure all elements are loaded
-	tasks = append(tasks, chromedp.Sleep(2*time.Second))
+	// Reduced delay to ensure all elements are loaded
+	tasks = append(tasks, chromedp.Sleep(1*time.Second)) // Reduced from 2s to 1s
 
 	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 		// Get page metrics
@@ -1034,17 +1081,17 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		tasks = append(tasks, s.setCookiesAndLocalStorage(ctx, urlConfig, viewport, viewportDir, "after-viewport", "viewport"))
 	}
 
-	// Add remaining actions for screenshot
+	// Add remaining actions for screenshot - reduce sleep times
 	tasks = append(tasks,
 		chromedp.Sleep(time.Duration(urlConfig.Delay)*time.Millisecond),
 
 		// Scroll to bottom to load lazy content
 		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for content to load
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 
 		// Scroll back to top
 		chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
-		chromedp.Sleep(1*time.Second), // Wait for animations to complete
+		chromedp.Sleep(500*time.Millisecond), // Reduced from 1s to 500ms
 	)
 
 	tasks = append(tasks, chromedp.Evaluate(`Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)`, &pageHeight))
@@ -1082,7 +1129,7 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		if err := chromedp.Run(ctx,
 			// Scroll to top
 			chromedp.Evaluate(`window.scrollTo(0, 0)`, nil),
-			chromedp.Sleep(500*time.Millisecond),
+			chromedp.Sleep(300*time.Millisecond), // Reduced from 500ms to 300ms
 
 			// Set device metrics to capture only viewport
 			emulation.SetDeviceMetricsOverride(int64(viewport.Width), int64(viewport.Height), 1, false).
@@ -1091,8 +1138,8 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 					Angle: 0,
 				}),
 
-			// Add a longer delay before screenshot to ensure everything is rendered
-			chromedp.Sleep(1500*time.Millisecond),
+			// Reduced delay before screenshot to ensure everything is rendered
+			chromedp.Sleep(800*time.Millisecond), // Reduced from 1500ms to 800ms
 
 			// Capture screenshot
 			chromedp.CaptureScreenshot(&buf),
@@ -1109,54 +1156,81 @@ func (s *Screenshoter) captureViewportScreenshots(ctx context.Context, urlConfig
 		return nil
 	}
 
+	// Use a WaitGroup to capture viewport sections in parallel
+	var wg sync.WaitGroup
+	// Error channel for parallel processing
+	errChan := make(chan error, viewportCount)
+	// Semaphore to limit parallel screenshot captures
+	vpSem := make(chan struct{}, 4) // Process up to 4 viewport sections in parallel
+
 	// Capture each viewport section with precise positioning
 	for i := 0; i < viewportCount; i++ {
-		var buf []byte
-		// Calculate exact scroll position for this section
-		scrollPos := float64(i) * viewportHeight
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
 
-		// For the last viewport, ensure we're at the bottom of the page
-		if i == viewportCount-1 && scrollPos+viewportHeight > pageHeight {
-			scrollPos = pageHeight - viewportHeight
-			if scrollPos < 0 {
-				scrollPos = 0
+			// Acquire semaphore
+			vpSem <- struct{}{}
+			defer func() { <-vpSem }()
+
+			// Calculate exact scroll position for this section
+			scrollPos := float64(i) * viewportHeight
+
+			// For the last viewport, ensure we're at the bottom of the page
+			if i == viewportCount-1 && scrollPos+viewportHeight > pageHeight {
+				scrollPos = pageHeight - viewportHeight
+				if scrollPos < 0 {
+					scrollPos = 0
+				}
 			}
-		}
 
-		filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, viewport.Width, viewport.Height, i+1, s.Config.FileFormat)
-		filepath := filepath.Join(viewportDir, filename)
+			filename := fmt.Sprintf("%s-viewport-%dx%d-%d.%s", timestamp, viewport.Width, viewport.Height, i+1, s.Config.FileFormat)
+			filepath := filepath.Join(viewportDir, filename)
 
-		// Scroll to position and capture screenshot of only the viewport
-		if err := chromedp.Run(ctx,
-			// Scroll to position with precise placement
-			chromedp.Evaluate(fmt.Sprintf(`window.scrollTo({top: %f, left: 0, behavior: 'instant'})`, scrollPos), nil),
-			chromedp.Sleep(500*time.Millisecond), // Give time for any content to load at this position
+			var buf []byte
+			// Scroll to position and capture screenshot of only the viewport
+			if err := chromedp.Run(ctx,
+				// Scroll to position with precise placement
+				chromedp.Evaluate(fmt.Sprintf(`window.scrollTo({top: %f, left: 0, behavior: 'instant'})`, scrollPos), nil),
+				chromedp.Sleep(300*time.Millisecond), // Reduced from 500ms to 300ms
 
-			// Ensure device metrics are set to capture only viewport
-			emulation.SetDeviceMetricsOverride(int64(viewport.Width), int64(viewport.Height), 1, false).
-				WithScreenOrientation(&emulation.ScreenOrientation{
-					Type:  emulation.OrientationTypePortraitPrimary,
-					Angle: 0,
-				}),
+				// Ensure device metrics are set to capture only viewport
+				emulation.SetDeviceMetricsOverride(int64(viewport.Width), int64(viewport.Height), 1, false).
+					WithScreenOrientation(&emulation.ScreenOrientation{
+						Type:  emulation.OrientationTypePortraitPrimary,
+						Angle: 0,
+					}),
 
-			// Add a longer delay before screenshot to ensure everything is rendered
-			chromedp.Sleep(1500*time.Millisecond),
+				// Reduced delay before screenshot to ensure everything is rendered
+				chromedp.Sleep(800*time.Millisecond), // Reduced from 1500ms to 800ms
 
-			// Capture only the viewport screenshot
-			chromedp.CaptureScreenshot(&buf),
-		); err != nil {
-			return err
-		}
+				// Capture only the viewport screenshot
+				chromedp.CaptureScreenshot(&buf),
+			); err != nil {
+				errChan <- err
+				return
+			}
 
-		// Save screenshot to file
-		if err := os.WriteFile(filepath, buf, 0644); err != nil {
-			return err
-		}
+			// Save screenshot to file
+			if err := os.WriteFile(filepath, buf, 0644); err != nil {
+				errChan <- err
+				return
+			}
 
-		log.Printf("Captured viewport screenshot for %s: %s", urlConfig.Name, filepath)
+			log.Printf("Captured viewport screenshot for %s: %s", urlConfig.Name, filepath)
+		}(i)
 	}
 
-	return nil
+	// Wait for all viewport sections to be captured
+	wg.Wait()
+
+	// Check if there were any errors
+	select {
+	case err := <-errChan:
+		return err
+	default:
+		return nil
+	}
 }
 
 // extractDomainFromURL extracts a domain name from a URL for cookie setting
@@ -1262,7 +1336,8 @@ func (s *Screenshoter) createViewProof(viewproofData map[string]string, forceful
 				
 				// Create title with clean styling
 				var title = document.createElement('h2');
-				title.innerText = 'VIEWPROOF DATA';
+				title.innerText = '🤖 VIEWPROOF DATA';
+				title.classList.add('viewproof-title');
 				
 				const titleStyles = {
 					margin: '0 0 20px 0',
@@ -1328,7 +1403,7 @@ func (s *Screenshoter) createViewProof(viewproofData map[string]string, forceful
 				// Create block
 				block = document.createElement('div');
 				block.id = '` + elementID + `';
-				block.innerHTML = '<div class="viewproof-title">VIEWPROOF DATA</div><pre class="viewproof-content">` + escapeJSString(formattedData) + `</pre>';
+				block.innerHTML = '<div class="viewproof-title">🤖 VIEWPROOF DATA</div><pre class="viewproof-content">` + escapeJSString(formattedData) + `</pre>';
 				document.body.appendChild(block);
 				console.log('ViewProof block created and made visible');
 				return true;
@@ -1369,6 +1444,7 @@ func (s *Screenshoter) createViewProof(viewproofData map[string]string, forceful
 		/* Typography */
 		font-size: 24px !important;
 	}
+
 	
 	.viewproof-important {
 		position: fixed !important;
@@ -1409,6 +1485,9 @@ func (s *Screenshoter) createViewProof(viewproofData map[string]string, forceful
 		font-size: 22px !important;
 		font-weight: bold !important;
 		margin-bottom: 10px !important;
+		text-align: center !important;
+		width: 100% !important;
+		display: block !important;
 	}
 	
 	.viewproof-content {
